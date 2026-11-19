@@ -1,0 +1,30 @@
+{
+  "name": "@cgsi/session",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Per-app sessions for CGSI apps: a hub-signed token in a host-only cookie.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
+  },
+  "peerDependencies": {
+    "next": ">=15"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "next": "^16.2.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
