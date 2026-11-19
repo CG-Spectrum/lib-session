@@ -49,6 +49,10 @@ export function cookieNames(secure: boolean) {
     handle: `${p}cgsi.session-handle`,
     state: `${p}cgsi.session-state`,
     tried: `${p}cgsi.session-tried`,
+    // One fresh sign-in has already been started because the hub could not
+    // answer. Lives as long as a pending sign-in can (STATE_TTL_SECONDS), so a
+    // second one cannot be started while the first is still good.
+    restarted: `${p}cgsi.session-restarted`,
   };
 }
 

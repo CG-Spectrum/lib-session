@@ -40,6 +40,12 @@ const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const grant = async (over?: Parameters<typeof mint>[0], opts?: Parameters<typeof mint>[1]) =>
   new Response(JSON.stringify({ token: await mint(over, opts), handle: "h-next", expires_in: 900 }), { status: 200 });
 const down = () => { throw new Error("network"); };
+/** The hub has nothing to give right now: it has spent nothing. */
+const busy = (retryAfter?: string) =>
+  new Response(JSON.stringify({ error: "busy" }), {
+    status: 503, headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+  });
+const tokenCalls = () => hubState.calls.filter((c) => c.url.endsWith("/token")).length;
 
 function setup(over: Partial<AppSessionOptions> = {}) {
   const o: AppSessionOptions = {
@@ -298,6 +304,7 @@ describe("the hub cannot be reached", () => {
     clock += 20 * 60 * 1000;
     hubState.token = () => new Response("boom", { status: 500 });
     expect((await handle(request("/", { cookies: { [names.token]: old, [names.handle]: "h1" } })))!.headers.get("x-middleware-next")).toBe("1");
+    clock += 1100; // past the moment the hub is left alone for after failing to answer
     hubState.token = () => new Response("{}", { status: 401 });
     expect((await handle(request("/", { cookies: { [names.token]: old, [names.handle]: "h1" } })))!.headers.get("location")).toContain("/authorize");
   });
@@ -403,6 +410,204 @@ describe("signing out, with a page to come back to", () => {
     expect(after((await setup().handle(request(`/session/signout?callbackUrl=${encodeURIComponent("https://evil.test/x")}`)))!)).toBe(APP));
   it("works for a person still on the shared cookie (mode both)", async () =>
     expect((await setup({ mode: "both" }).handle(request("/session/signout"), { legacySignedIn: true }))!.headers.get("location")).toContain(`${HUB}/signout`));
+});
+
+describe("a sign-in the hub could not answer", () => {
+  const pending = JSON.stringify({ s: "state-1", v: "verifier-1", r: "/people" });
+  const callback = (cookies: Record<string, string>) => request("/session/callback?code=c1&state=state-1", { cookies });
+
+  it("own: starts a fresh sign-in once, back to the page the person wanted", async () => {
+    hubState.token = () => busy("1");
+    const res = (await setup().handle(callback({ [names.state]: pending })))!;
+    const to = new URL(res.headers.get("location")!);
+    expect(to.origin + to.pathname).toBe(`${HUB}/authorize`);
+    const started = readPending(decodeURIComponent(setCookie(res, names.state)!.split(";")[0].split("=").slice(1).join("=")))!;
+    expect(started.r).toBe("/people");
+    expect(started.s).toBe(to.searchParams.get("state"));
+    expect(started.s).not.toBe("state-1"); // a fresh sign-in, not the old one again
+    const marker = setCookie(res, names.restarted)!;
+    expect(marker).toContain("HttpOnly");
+    expect(marker).toContain("Secure");
+    expect(marker).not.toContain("Domain=");
+    expect(marker).toContain("Max-Age=600");
+    expect(tokenCalls()).toBe(1); // the code from this callback is never sent twice
+  });
+
+  it("own: a second failure shows the page, and clears the marker", async () => {
+    hubState.token = () => busy("1");
+    const res = (await setup().handle(callback({ [names.state]: pending, [names.restarted]: "1" })))!;
+    expect(res.status).toBe(401);
+    expect(await res.text()).toContain("Sign-in could not be completed");
+    expect(res.headers.get("location")).toBeNull();
+    expect(setCookie(res, names.restarted)).toContain("Max-Age=0");
+  });
+
+  it("own: a refusal, a state that does not match and a bad token are never restarted", async () => {
+    for (const answer of [() => new Response("{}", { status: 401 }), () => new Response("{}", { status: 403 }), () => grant({}, { aud: "home" })]) {
+      hubState.token = answer;
+      const res = (await setup().handle(callback({ [names.state]: pending })))!;
+      expect(res.status).toBe(401);
+      expect(res.headers.get("location")).toBeNull();
+      expect(setCookie(res, names.restarted)).toContain("Max-Age=0");
+    }
+    hubState.token = () => busy("1");
+    const mismatch = (await setup().handle(request("/session/callback?code=c1&state=WRONG", { cookies: { [names.state]: pending } })))!;
+    expect(mismatch.status).toBe(401);
+    expect(tokenCalls()).toBe(3); // the mismatch never reached the hub
+  });
+
+  it("own: the marker is cleared when a sign-in succeeds", async () => {
+    hubState.token = () => grant();
+    const res = (await setup().handle(callback({ [names.state]: pending, [names.restarted]: "1" })))!;
+    expect(res.headers.get("location")).toBe(`${APP}/people`);
+    expect(setCookie(res, names.restarted)).toContain("Max-Age=0");
+  });
+
+  it("own: carrying the marker the first answer set cannot start a third attempt, so there is no loop", async () => {
+    hubState.token = () => busy("1");
+    const { handle } = setup();
+    const first = (await handle(callback({ [names.state]: pending })))!;
+    expect(first.headers.get("location")).toContain("/authorize");
+    const carried = setCookie(first, names.restarted)!.split(";")[0].split("=").slice(1).join("=");
+    const second = (await handle(callback({ [names.state]: pending, [names.restarted]: carried })))!;
+    expect(second.status).toBe(401);
+    const third = (await handle(callback({ [names.state]: pending, [names.restarted]: carried })))!;
+    expect(third.status).toBe(401);
+  });
+
+  it("both is unchanged: back to the page on the shared cookie, and no restart", async () => {
+    hubState.token = () => busy("1");
+    const res = (await setup({ mode: "both" }).handle(callback({ [names.state]: pending })))!;
+    expect(res.headers.get("location")).toBe(`${APP}/people`);
+    expect(setCookie(res, names.restarted)).toBeUndefined();
+    expect(setCookie(res, names.token)).toBeUndefined();
+  });
+});
+
+describe("the hub says it is busy", () => {
+  it("skips renewal calls for as long as the hub asked", async () => {
+    hubState.token = () => busy("3");
+    const { hub } = setup();
+    expect((await hub.renew("h1")).ok).toBe(false);
+    expect(tokenCalls()).toBe(1);
+    expect(await hub.renew("h2")).toEqual({ ok: false, reason: "unreachable" });
+    expect(tokenCalls()).toBe(1);
+    clock += 2900;
+    await hub.renew("h3");
+    expect(tokenCalls()).toBe(1);
+    clock += 200;
+    await hub.renew("h4");
+    expect(tokenCalls()).toBe(2);
+  });
+
+  it("clamps a silly Retry-After to between one and five seconds", async () => {
+    hubState.token = () => busy("900");
+    const long = setup().hub;
+    await long.renew("h1");
+    clock += 4900;
+    await long.renew("h2");
+    expect(tokenCalls()).toBe(1);
+    clock += 200;
+    await long.renew("h3");
+    expect(tokenCalls()).toBe(2);
+
+    hubState.token = () => busy("0");
+    const short = setup().hub;
+    await short.renew("a1");
+    expect(tokenCalls()).toBe(3);
+    clock += 500;
+    await short.renew("a2");
+    expect(tokenCalls()).toBe(3);
+    clock += 600;
+    await short.renew("a3");
+    expect(tokenCalls()).toBe(4);
+  });
+
+  it("waits a second when the Retry-After is missing or not whole seconds, and when there is no answer at all", async () => {
+    const answers: (typeof hubState.token)[] = [
+      () => busy(), () => busy("soon"), () => busy("Wed, 19 Nov 2026 00:00:30 GMT"), down,
+    ];
+    for (const answer of answers) {
+      hubState.calls = [];
+      hubState.token = answer;
+      const { hub } = setup();
+      await hub.renew("h1");
+      clock += 900;
+      await hub.renew("h2");
+      expect(tokenCalls()).toBe(1);
+      clock += 200;
+      await hub.renew("h3");
+      expect(tokenCalls()).toBe(2);
+    }
+  });
+
+  it("never holds off a person finishing a sign-in", async () => {
+    hubState.token = () => busy("5");
+    const { hub } = setup();
+    await hub.renew("h1");
+    expect(tokenCalls()).toBe(1);
+    expect((await hub.exchange("c1", "verifier-1")).ok).toBe(false);
+    expect(tokenCalls()).toBe(2);
+    expect(hubState.calls.at(-1)!.body).toEqual({ app: "console", grant: "code", code: "c1", verifier: "verifier-1" });
+  });
+});
+
+describe("renewing once for a handle", () => {
+  it("requests arriving together with one handle make a single call and share its answer", async () => {
+    hubState.token = () => grant();
+    const { hub } = setup();
+    const answers = await Promise.all([1, 2, 3, 4, 5].map(() => hub.renew("h1")));
+    expect(tokenCalls()).toBe(1);
+    expect(answers[0].ok).toBe(true);
+    for (const a of answers) expect(a).toBe(answers[0]);
+  });
+
+  it("another handle gets its own call", async () => {
+    hubState.token = () => grant();
+    const { hub } = setup();
+    const [a, b] = await Promise.all([hub.renew("h1"), hub.renew("h2")]);
+    expect(tokenCalls()).toBe(2);
+    expect(a).not.toBe(b);
+    expect(hubState.calls.filter((c) => c.url.endsWith("/token")).map((c) => c.body?.handle).sort()).toEqual(["h1", "h2"]);
+  });
+
+  it("the shared answer lasts a few seconds and then goes", async () => {
+    hubState.token = () => grant();
+    const { hub } = setup();
+    const first = await hub.renew("h1");
+    clock += 2000;
+    expect(await hub.renew("h1")).toBe(first);
+    expect(tokenCalls()).toBe(1);
+    clock += 1100;
+    expect(await hub.renew("h1")).not.toBe(first);
+    expect(tokenCalls()).toBe(2);
+  });
+
+  it("only so many handles are held at once", async () => {
+    hubState.token = () => grant();
+    const { hub } = setup();
+    for (let i = 0; i < 120; i++) await hub.renew(`h${i}`);
+    expect(tokenCalls()).toBe(120);
+    await hub.renew("h119"); // still held: shared, no call
+    expect(tokenCalls()).toBe(120);
+    await hub.renew("h0"); // dropped long ago to keep the map small: a call of its own
+    expect(tokenCalls()).toBe(121);
+  });
+
+  it("logs a reason only: never a handle, a token or a code", async () => {
+    const seen: string[] = [];
+    hubState.token = () => busy("1");
+    const { handle } = setup({ log: (m) => seen.push(m) });
+    const old = await mint({}, { ttl: 30 });
+    await handle(request("/", { cookies: { [names.token]: old, [names.handle]: "handle-abc" } }));
+    await handle(request("/session/callback?code=code-abc&state=state-1", {
+      cookies: { [names.state]: JSON.stringify({ s: "state-1", v: "verifier-abc", r: "/people" }) },
+    }));
+    expect(seen.length).toBeGreaterThan(0);
+    for (const line of seen) {
+      for (const secret of ["handle-abc", "code-abc", "verifier-abc", old]) expect(line).not.toContain(secret);
+    }
+  });
 });
 
 describe("server code reading the session", () => {

@@ -88,10 +88,10 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
     return res;
   }
 
-  async function startSignIn(req: NextRequest, markTried: boolean) {
+  async function startSignIn(req: NextRequest, markTried: boolean, sendBackTo?: string) {
     const state = randomValue(24);
     const verifier = randomValue(32);
-    const returnTo = req.nextUrl.pathname + req.nextUrl.search;
+    const returnTo = sendBackTo ?? req.nextUrl.pathname + req.nextUrl.search;
     const res = noStore(NextResponse.redirect(hub.authorizeUrl(state, await challengeFor(verifier))));
     res.cookies.set(names.state, JSON.stringify({ s: state, v: verifier, r: returnTo }), cookie(STATE_TTL_SECONDS));
     if (markTried) res.cookies.set(names.tried, "1", cookie(RETRY_AFTER_SECONDS));
@@ -107,23 +107,41 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
       res.cookies.set(names.state, "", cookie(0));
       return res;
     };
-    const failed = (why: string) => {
+    /**
+     * `mayRestart` is true only when the hub could not answer. The hub spends
+     * nothing on that answer, so the sign-in is still there to be had; a
+     * refusal (invalid, no_access), a state that does not match, or a token
+     * this app would not accept are all answers, and are never retried.
+     */
+    const failed = async (why: string, mayRestart = false) => {
       log(`sign-in not completed: ${why}`);
       // `both`: the shared cookie carries on; the `tried` cookie stops a loop.
       if (o.mode === "both") return back(pending?.r ?? "/");
+      // `own`: nothing to fall back on, so send the person through sign-in
+      // once more, to the page they were going to. The code from this callback
+      // is NOT used again: it may or may not have been spent, and the callback
+      // must stay quick, so this starts a fresh sign-in. The marker makes a
+      // second restart impossible while the first one is still good.
+      if (mayRestart && req.method === "GET" && !req.cookies.has(names.restarted)) {
+        const res = await startSignIn(req, false, pending?.r ?? "/");
+        res.cookies.set(names.restarted, "1", cookie(STATE_TTL_SECONDS));
+        return res;
+      }
       const res = noStore(new NextResponse("Sign-in could not be completed. Go back and try again.", { status: 401 }));
       res.cookies.set(names.state, "", cookie(0));
+      res.cookies.set(names.restarted, "", cookie(0));
       return res;
     };
     if (!pending || !code || !state || state !== pending.s) return failed("state");
     const granted = await hub.exchange(code, pending.v);
-    if (!granted.ok) return failed(granted.reason);
+    if (!granted.ok) return failed(granted.reason, granted.reason === "unreachable");
     // Never store what this app would not itself accept.
     if ((await hub.check(granted.token)).state !== "valid") return failed("token");
     const res = back(pending.r);
     res.cookies.set(names.token, granted.token, cookie(COOKIE_MAX_AGE_SECONDS));
     res.cookies.set(names.handle, granted.handle, cookie(COOKIE_MAX_AGE_SECONDS));
     res.cookies.set(names.tried, "", cookie(0));
+    res.cookies.set(names.restarted, "", cookie(0));
     return res;
   }
 

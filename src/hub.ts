@@ -40,6 +40,39 @@ export interface Hub {
   noAccessUrl(): string;
 }
 
+// ── When the hub has nothing to give ─────────────────────────────────────────
+// A /token call ends as `unreachable` when the hub times out, the network
+// fails, or the hub answers that it is busy. The hub spends nothing on such an
+// answer, so the code or handle that was sent is still good.
+//
+// How long to wait before asking again. A hub that says `Retry-After` in whole
+// seconds is believed, within these bounds; anything else (a date, nonsense,
+// no header at all, no answer at all) waits the shortest time.
+const BUSY_MIN_MS = 1000;
+const BUSY_MAX_MS = 5000;
+function busyForMs(res: Response | null): number {
+  const raw = res?.headers.get("retry-after")?.trim();
+  if (raw && /^\d{1,6}$/.test(raw)) {
+    return Math.min(Math.max(Number(raw) * 1000, BUSY_MIN_MS), BUSY_MAX_MS);
+  }
+  return BUSY_MIN_MS;
+}
+
+// How long one renewal's answer stays available to other requests carrying the
+// SAME handle, after the call it came from has finished.
+const SHARE_RENEWAL_MS = 3000;
+// At most this many handles are remembered at once, so a busy instance cannot
+// grow the map without bound. The oldest entry goes first.
+const MAX_SHARED_RENEWALS = 100;
+
+/** SHA-256, so the map holds a fingerprint of a handle and never the handle. */
+async function fingerprint(value: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  let s = "";
+  for (const b of digest) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
 export function createHub(o: HubOptions): Hub {
   const base = o.hubUrl.replace(/\/$/, "");
   const issuer = (o.issuer ?? base).replace(/\/$/, "");
@@ -56,6 +89,19 @@ export function createHub(o: HubOptions): Hub {
 
   let seen: { ok: boolean; until: number } | null = null;
 
+  // In memory, in this instance only. Nothing here is shared between processes
+  // and nothing survives a restart: it is a few seconds of good manners
+  // towards a hub that is already behind, not a cache of anything.
+  let busyUntil = 0;
+  type SharedRenewal = { grant: Promise<TokenGrant>; until: number };
+  const sharedRenewals = new Map<string, SharedRenewal>();
+
+  /** The hub gave nothing. Hold off on renewals for a moment. */
+  function nothingToGive(res: Response | null): TokenGrant {
+    busyUntil = Math.max(busyUntil, now() + busyForMs(res));
+    return { ok: false, reason: "unreachable" };
+  }
+
   async function grant(body: Record<string, string>): Promise<TokenGrant> {
     let res: Response;
     try {
@@ -65,18 +111,57 @@ export function createHub(o: HubOptions): Hub {
         body: JSON.stringify({ app: o.app, ...body }),
       });
     } catch {
-      return { ok: false, reason: "unreachable" };
+      return nothingToGive(null);
     }
     if (res.status === 401) return { ok: false, reason: "invalid" };
     if (res.status === 403) return { ok: false, reason: "no_access" };
-    if (res.status !== 200) return { ok: false, reason: "unreachable" };
+    if (res.status !== 200) return nothingToGive(res);
     try {
       const j = (await res.json()) as { token?: unknown; handle?: unknown };
-      if (typeof j.token !== "string" || typeof j.handle !== "string") return { ok: false, reason: "unreachable" };
+      if (typeof j.token !== "string" || typeof j.handle !== "string") return nothingToGive(res);
       return { ok: true, token: j.token, handle: j.handle };
     } catch {
-      return { ok: false, reason: "unreachable" };
+      return nothingToGive(res);
     }
+  }
+
+  /**
+   * One renewal per handle at a time.
+   *
+   * A single page load makes several requests at once, all carrying the same
+   * handle cookie, and all of them can arrive in the last minute of the token.
+   * They are one browser session asking one question, so they make one call
+   * and share its answer. A NEW TOKEN stays available for a few seconds after
+   * the call finishes, because requests that set off with the same old cookie
+   * are still arriving. Anything else is dropped the moment the call ends: a
+   * refusal must reach the next request at once, so that a session the hub has
+   * ended is not carried for another few seconds.
+   *
+   * Sharing is safe because a handle IS the session: it lives in a host-only
+   * HttpOnly cookie that only that browser holds, so a token issued for it
+   * belongs to whoever presented it. It would stop being safe if handles were
+   * ever shared between people or apps, if the hub made the token depend on
+   * anything but the handle (something per-request, say), or if each caller
+   * had to receive its own single-use handle. Any of those, and this must go.
+   */
+  function renewOnce(handle: string, key: string): Promise<TokenGrant> {
+    const open = sharedRenewals.get(key);
+    if (open && open.until > now()) return open.grant;
+    for (const [k, v] of sharedRenewals) if (v.until <= now()) sharedRenewals.delete(k);
+    if (sharedRenewals.size >= MAX_SHARED_RENEWALS) {
+      const oldest = sharedRenewals.keys().next();
+      if (!oldest.done) sharedRenewals.delete(oldest.value);
+    }
+    // Infinity while the call is in flight: waiters must not start a second
+    // call because the sharing window ran out mid-call.
+    const entry: SharedRenewal = { grant: grant({ grant: "renew", handle }), until: Number.POSITIVE_INFINITY };
+    sharedRenewals.set(key, entry);
+    const done = (held: boolean) => {
+      if (held) entry.until = now() + SHARE_RENEWAL_MS;
+      else if (sharedRenewals.get(key) === entry) sharedRenewals.delete(key);
+    };
+    entry.grant.then((r) => done(r.ok), () => done(false));
+    return entry.grant;
   }
 
   return {
@@ -103,8 +188,16 @@ export function createHub(o: HubOptions): Hub {
         return { state: "invalid" };
       }
     },
+    // Finishing a sign-in is NOT held off while the hub is busy. A person at
+    // the end of a sign-in gets one attempt, and refusing it on the strength
+    // of some other request's failure a moment ago turns a slow hub into a
+    // dead end for them. There is one of these per sign-in, against many
+    // renewals per page load, so it adds nothing worth saving.
     exchange: (code, verifier) => grant({ grant: "code", code, verifier }),
-    renew: (handle) => grant({ grant: "renew", handle }),
+    async renew(handle) {
+      if (busyUntil > now()) return { ok: false, reason: "unreachable" };
+      return renewOnce(handle, await fingerprint(handle));
+    },
     async available() {
       if (seen && seen.until > now()) return seen.ok;
       let ok = false;

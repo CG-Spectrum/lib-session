@@ -58,11 +58,36 @@ Add the package to `transpilePackages` in `next.config` (it ships source).
   The same request already sees the new token.
 - Hub unreachable (never: hub refuses): the last token is honoured for up to
   60 minutes.
+- A hub that cannot answer in time (a timeout, a network error, or a `503`
+  saying it is busy) is left alone for a moment: renewals answer "unreachable"
+  without calling for `Retry-After` seconds, between 1 and 5, default 1.
+  Finishing a sign-in is never held off this way.
+- Several requests arriving at once with the same renewal handle make one call
+  to the hub and share its answer, for a few seconds.
+- `own`: a sign-in that cannot be finished because the hub did not answer is
+  started again once, to the page the person was going to. A refusal is never
+  retried.
 - Origin guard: a signed-in request that changes something must come from the
   app's own host. `SESSION_ORIGIN_GUARD` = `off`, `report` or `enforce`
   (default: off while `shared`, enforce otherwise).
 
 ## Cookies
 
-`__Host-cgsi.session`, `__Host-cgsi.session-handle` (and two short-lived
+`__Host-cgsi.session`, `__Host-cgsi.session-handle` (and three short-lived
 helpers). Host-only, HttpOnly, Secure, SameSite=Lax. Never a parent domain.
+
+## Changes
+
+### 0.1.2
+
+- A hub that cannot answer in time is left alone briefly: renewals answer
+  "unreachable" without calling, for `Retry-After` seconds (1 to 5, default 1).
+  Finishing a sign-in is not held off.
+- Requests arriving together with the same renewal handle make one call to the
+  hub and share its answer for a few seconds.
+- `own`: a sign-in the hub could not answer restarts once, instead of ending on
+  the "could not be completed" page. Refusals are unchanged.
+
+### 0.1.1
+
+- A session the hub has ended is never passed through.
