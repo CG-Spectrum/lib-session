@@ -316,6 +316,70 @@ describe("the hub cannot be reached", () => {
   });
 });
 
+describe("the grace period", () => {
+  const graced = (res: Response) => res.headers.get(`x-middleware-request-${GRACE_HEADER}`);
+
+  it("is set only when a renewal in this same request could not reach the hub", async () => {
+    const old = await mint();
+    clock += 20 * 60 * 1000; // five minutes past its time
+    const signedIn = { [names.token]: old, [names.handle]: "h1" };
+
+    hubState.token = () => new Response("{}", { status: 401 });
+    const refused = (await setup().handle(request("/", { cookies: signedIn })))!;
+    expect(graced(refused)).toBeNull();
+    expect(refused.headers.get("location")).toContain("/authorize");
+
+    hubState.token = () => new Response("{}", { status: 403 });
+    const noAccess = (await setup().handle(request("/", { cookies: signedIn })))!;
+    expect(graced(noAccess)).toBeNull();
+    expect(noAccess.headers.get("location")).toBe(`${HUB}/no-access?app=console`);
+
+    hubState.token = () => busy("1");
+    const noHandle = (await setup().handle(request("/", { cookies: { [names.token]: old } })))!;
+    expect(graced(noHandle)).toBeNull();
+    expect(noHandle.headers.get("location")).toContain("/authorize");
+    expect(tokenCalls()).toBe(2); // with no handle there is nothing to attempt
+
+    const unreachable = (await setup().handle(request("/", { cookies: signedIn })))!;
+    expect(unreachable.headers.get("x-middleware-next")).toBe("1");
+    expect(graced(unreachable)).toBe("1");
+
+    // A token with time left on it, renewed early, hub unreachable: passed on,
+    // and not marked, because it has not expired.
+    const early = (await setup().handle(request("/", { cookies: { [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1" } })))!;
+    expect(early.headers.get("x-middleware-next")).toBe("1");
+    expect(graced(early)).toBeNull();
+  });
+
+  it("while the hub is left alone an expired token is carried unasked, and the first call after it ends the session", async () => {
+    const old = await mint();
+    clock += 20 * 60 * 1000;
+    const signedIn = { [names.token]: old, [names.handle]: "h1" };
+    hubState.token = () => busy("5");
+    const { handle } = setup();
+
+    const asked = (await handle(request("/", { cookies: signedIn })))!;
+    expect(tokenCalls()).toBe(1);
+    expect(graced(asked)).toBe("1");
+
+    // Inside the pause nothing is asked, so a refusal the hub would give now
+    // cannot arrive, and the person is carried.
+    hubState.token = () => new Response("{}", { status: 401 });
+    clock += 4000;
+    const carried = (await handle(request("/", { cookies: signedIn })))!;
+    expect(tokenCalls()).toBe(1);
+    expect(graced(carried)).toBe("1");
+
+    // The first call made after the pause gets the real answer, at once.
+    clock += 1100;
+    const ended = (await handle(request("/", { cookies: signedIn })))!;
+    expect(tokenCalls()).toBe(2);
+    expect(graced(ended)).toBeNull();
+    expect(ended.headers.get("location")).toContain("/authorize");
+    expect(setCookie(ended, names.token)).toContain("Max-Age=0");
+  });
+});
+
 describe("mode both", () => {
   const legacy = { "__Secure-authjs.session-token": "legacy" };
   it("not signed in at all: not mine (the app's old redirect runs)", async () =>
@@ -473,6 +537,37 @@ describe("a sign-in the hub could not answer", () => {
     expect(second.status).toBe(401);
     const third = (await handle(callback({ [names.state]: pending, [names.restarted]: carried })))!;
     expect(third.status).toBe(401);
+  });
+
+  it("own: a hub that stays down cannot loop the browser, because the marker travels back with it", async () => {
+    hubState.token = () => busy("1");
+    const { handle } = setup();
+    // A browser's cookie jar, filled from what each answer sets.
+    const jar: Record<string, string> = {};
+    const browserGoesTo = async (path: string) => {
+      const res = (await handle(request(path, { cookies: { ...jar } })))!;
+      for (const c of res.headers.getSetCookie()) {
+        const [pair, ...attributes] = c.split(";");
+        const at = pair.indexOf("=");
+        if (attributes.some((a) => a.trim().toLowerCase() === "max-age=0")) delete jar[pair.slice(0, at)];
+        else jar[pair.slice(0, at)] = decodeURIComponent(pair.slice(at + 1));
+      }
+      return res;
+    };
+    const comingBackFromTheHub = () =>
+      `/session/callback?code=c1&state=${encodeURIComponent(readPending(jar[names.state])!.s)}`;
+
+    const page = await browserGoesTo("/people");
+    expect(page.headers.get("location")).toContain("/authorize");
+    const firstTry = await browserGoesTo(comingBackFromTheHub());
+    expect(firstTry.headers.get("location")).toContain("/authorize"); // one restart
+    expect(jar[names.restarted]).toBe("1"); // the browser is carrying the marker
+    expect(readPending(jar[names.state])!.r).toBe("/people");
+    const secondTry = await browserGoesTo(comingBackFromTheHub());
+    expect(secondTry.status).toBe(401);
+    expect(secondTry.headers.get("location")).toBeNull(); // the page, not another round
+    expect(jar[names.restarted]).toBeUndefined();
+    expect(tokenCalls()).toBe(2); // two exchanges, never the same code twice
   });
 
   it("both is unchanged: back to the page on the shared cookie, and no restart", async () => {

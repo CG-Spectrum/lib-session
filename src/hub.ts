@@ -1,6 +1,6 @@
 // Talking to the sign-in hub: checking a token, and the two /token calls.
 import { createRemoteJWKSet, customFetch, errors, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { sessionFromClaims, type AppSession } from "./core";
+import { HUB_TOKEN_TIMEOUT_MS, sessionFromClaims, type AppSession } from "./core";
 
 export interface HubOptions {
   /** This app's key in the hub's registry, e.g. "console". */
@@ -106,7 +106,7 @@ export function createHub(o: HubOptions): Hub {
     let res: Response;
     try {
       res = await doFetch(`${base}/token`, {
-        method: "POST", cache: "no-store", signal: AbortSignal.timeout(4000),
+        method: "POST", cache: "no-store", signal: AbortSignal.timeout(HUB_TOKEN_TIMEOUT_MS),
         headers: { ...headers, "content-type": "application/json" },
         body: JSON.stringify({ app: o.app, ...body }),
       });
