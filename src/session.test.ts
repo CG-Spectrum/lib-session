@@ -335,6 +335,35 @@ describe("mode both", () => {
   });
 });
 
+describe("mode both, when the hub has ended the app's own session", () => {
+  const legacy = { "__Secure-authjs.session-token": "legacy" };
+  // The token still has 30 seconds on it; the hub refuses to renew (401).
+  const dying = async () => ({ [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1" });
+  it("still signed in the old way: carries on, and server code never sees the dead token", async () => {
+    const cookies = { ...legacy, ...(await dying()), other: "x" };
+    const res = (await setup({ mode: "both" }).handle(request("/people", { cookies, headers: { "sec-fetch-dest": "empty" } }), { legacySignedIn: true }))!;
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+    expect(forwarded(res)).not.toContain(names.token);
+    expect(forwarded(res)).not.toContain(names.handle);
+    expect(forwarded(res)).toContain("__Secure-authjs.session-token=legacy");
+    expect(forwarded(res)).toContain("other=x");
+    expect(setCookie(res, names.token)).toContain("Max-Age=0");
+  });
+  it("NOT signed in the old way either: signed out, never passed through on a token's last seconds", async () => {
+    const page = (await setup({ mode: "both" }).handle(request("/people", { cookies: await dying() }), { legacySignedIn: false }))!;
+    expect(new URL(page.headers.get("location")!).pathname).toBe("/authorize");
+    expect(setCookie(page, names.token)).toContain("Max-Age=0");
+    const write = (await setup({ mode: "both" }).handle(request("/save", { method: "POST", headers: { origin: APP }, cookies: await dying() }), { legacySignedIn: false }))!;
+    expect(write.status).toBe(401);
+    const background = (await setup({ mode: "both" }).handle(request("/people", { cookies: await dying(), headers: { "sec-fetch-dest": "empty" } }), { legacySignedIn: false }))!;
+    expect(background.headers.get("x-middleware-next")).toBeNull();
+  });
+  it("a forged token with no shared cookie is signed out too", async () => {
+    const res = (await setup({ mode: "both" }).handle(request("/people", { cookies: { [names.token]: "forged" } }), { legacySignedIn: false }))!;
+    expect(new URL(res.headers.get("location")!).pathname).toBe("/authorize");
+  });
+});
+
 describe("the origin guard in the middleware", () => {
   const signedIn = async () => ({ [names.token]: await mint(), [names.handle]: "h1" });
   it("refuses a signed-in write from a sibling host", async () => {

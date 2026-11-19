@@ -56,23 +56,34 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
     return res;
   };
 
-  /** Pass the request on, with a fresh token if one was just issued. */
-  function pass(req: NextRequest, fresh?: { token: string; handle: string }, grace = false) {
+  /**
+   * Pass the request on. `fresh`: a token was just issued, so server code gets
+   * it now. `dead`: the hub ended this session, so server code must not see
+   * the old token at all, even if it has seconds left on it.
+   */
+  function pass(req: NextRequest, change?: { token: string; handle: string } | "dead", grace = false) {
     const headers = new Headers(req.headers);
     headers.delete(GRACE_HEADER); // never trust one a browser sent
     if (grace) headers.set(GRACE_HEADER, "1");
-    if (fresh) {
-      // Server code reads cookies from the REQUEST: give it the new token now,
-      // not on the next request.
+    if (change) {
+      // Server code reads cookies from the REQUEST, not from this response.
       const jar = new Map(req.cookies.getAll().map((c) => [c.name, c.value]));
-      jar.set(names.token, fresh.token);
-      jar.set(names.handle, fresh.handle);
-      headers.set("cookie", [...jar].map(([k, v]) => `${k}=${v}`).join("; "));
+      if (change === "dead") {
+        jar.delete(names.token);
+        jar.delete(names.handle);
+      } else {
+        jar.set(names.token, change.token);
+        jar.set(names.handle, change.handle);
+      }
+      const value = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+      if (value) headers.set("cookie", value);
+      else headers.delete("cookie");
     }
     const res = NextResponse.next({ request: { headers } });
-    if (fresh) {
-      res.cookies.set(names.token, fresh.token, cookie(COOKIE_MAX_AGE_SECONDS));
-      res.cookies.set(names.handle, fresh.handle, cookie(COOKIE_MAX_AGE_SECONDS));
+    if (change === "dead") return clearOwn(res);
+    if (change) {
+      res.cookies.set(names.token, change.token, cookie(COOKIE_MAX_AGE_SECONDS));
+      res.cookies.set(names.handle, change.handle, cookie(COOKIE_MAX_AGE_SECONDS));
     }
     return res;
   }
@@ -183,9 +194,10 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
         !req.cookies.has(names.tried) && (await hub.available());
       if (canTry) return clearOwn(await startSignIn(req, true));
       if (!dead) return null;
-      // Hand over to the shared cookie, dropping the dead session on the way.
-      const res = pass(req);
-      return clearOwn(res);
+      // The hub ended the app's own session. Signed in the old way as well:
+      // the shared cookie carries on, and the dead token is hidden from server
+      // code. Otherwise the person is signed out: the same as `own` below.
+      if (ctx.legacySignedIn === true) return pass(req, "dead");
     }
     if (req.method !== "GET") return clearOwn(noStore(new NextResponse("Signed out", { status: 401 })));
     return clearOwn(await startSignIn(req, false));
