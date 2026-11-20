@@ -1,6 +1,9 @@
 // Talking to the sign-in hub: checking a token, and the two /token calls.
 import { createRemoteJWKSet, customFetch, errors, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { HUB_TOKEN_TIMEOUT_MS, launcherAppsFrom, sessionFromClaims, type AppSession } from "./core";
+import {
+  HUB_CAPABILITY_TIMEOUT_MS, HUB_TOKEN_TIMEOUT_MS, launcherAppsFrom, sessionFromClaims,
+  type AppSession, type CapabilityNow,
+} from "./core";
 
 export interface HubOptions {
   /** This app's key in the hub's registry, e.g. "console". */
@@ -14,6 +17,11 @@ export interface HubOptions {
   /** For tests. */
   fetch?: typeof fetch;
   now?: () => number;
+  /**
+   * Where a reason word goes. ⛔ A WORD, NEVER A VALUE: no token, no key, no
+   * address. Defaults to a warning on the console, like the middleware's.
+   */
+  log?: (message: string) => void;
 }
 
 export type TokenCheck =
@@ -43,6 +51,15 @@ export interface Hub {
   check(token: string | undefined): Promise<TokenCheck>;
   exchange(code: string, verifier: string): Promise<TokenGrant>;
   renew(handle: string): Promise<TokenGrant>;
+  /**
+   * Does this person hold this capability RIGHT NOW? One POST to the hub,
+   * presenting the token it signed for this app. ⛔ Never throws, and never
+   * answers "held" without a 200 from the hub saying so in THIS call.
+   *
+   * Server code calls `checkCapabilityNow` (`@cgsi/session/server`) rather
+   * than this: it finds the person's current token for the request first.
+   */
+  checkCapability(token: string, key: string): Promise<CapabilityNow>;
   /** Is the hub offering per-app sessions at all? Cached. */
   available(): Promise<boolean>;
   authorizeUrl(state: string, challenge: string): string;
@@ -89,6 +106,7 @@ export function createHub(o: HubOptions): Hub {
   const doFetch: typeof fetch = o.fetch ?? ((...a) => fetch(...a));
   const now = o.now ?? (() => Date.now());
   const headers = o.hubHeaders ?? {};
+  const log = o.log ?? ((m: string) => console.warn(`[session] ${m}`));
 
   let jwks: JWTVerifyGetKey | null = null;
   const keys = () =>
@@ -208,6 +226,59 @@ export function createHub(o: HubOptions): Hub {
     // dead end for them. There is one of these per sign-in, against many
     // renewals per page load, so it adds nothing worth saving.
     exchange: (code, verifier) => grant({ grant: "code", code, verifier }),
+    /**
+     * The live check. Three answers and no fourth:
+     *
+     *   200 { held: true }   held, and only this
+     *   200 { held: false }  not_held
+     *   401                  not_held (the token or the session is finished;
+     *                        the hub answers every dead grant alike)
+     *   anything else        unavailable: a timeout, a network failure, a 400,
+     *                        a 404 (the hub has per-app sessions switched
+     *                        off), a 503 busy, or a body this cannot read
+     *
+     * ⛔ NOT HELD BY THE RENEWAL PAUSE. After a hub failure, renewals answer
+     * "unreachable" without calling for a second or two, which spares a hub
+     * that is already behind a flood of retries. This call neither respects
+     * that pause nor extends it, for three reasons: a sensitive decision is
+     * rare next to a renewal, so it adds no flood; the pause is per instance
+     * and per process, so honouring it would refuse people on one instance and
+     * not another for reasons neither can see; and it would turn one unrelated
+     * 503 into seconds of blanket refusal for every sensitive action. The
+     * failure it would be protecting against costs one request's timeout and
+     * ends in a refusal anyway. ⚖️ The safety of the pause is not what makes
+     * this safe: nothing but a real 200 saying `true` is ever "held".
+     */
+    async checkCapability(token, key) {
+      let res: Response;
+      try {
+        res = await doFetch(`${base}/capability`, {
+          method: "POST", cache: "no-store", signal: AbortSignal.timeout(HUB_CAPABILITY_TIMEOUT_MS),
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ app: o.app, token, capability: key }),
+        });
+      } catch (e) {
+        // ⛔ The NAME of the failure, never the error, the key or the token.
+        log(`capability check unavailable: ${(e as Error)?.name === "TimeoutError" ? "timeout" : "network"}`);
+        return "unavailable";
+      }
+      if (res.status === 401) return "not_held";
+      if (res.status !== 200) {
+        log(`capability check unavailable: status ${res.status}`);
+        return "unavailable";
+      }
+      try {
+        const j = (await res.json()) as { held?: unknown };
+        if (j.held === true) return "held";
+        if (j.held === false) return "not_held";
+        // A 200 whose body is not an answer is not an answer.
+        log("capability check unavailable: body");
+        return "unavailable";
+      } catch {
+        log("capability check unavailable: body");
+        return "unavailable";
+      }
+    },
     async renew(handle) {
       if (busyUntil > now()) return { ok: false, reason: "unreachable" };
       return renewOnce(handle, await fingerprint(handle));
