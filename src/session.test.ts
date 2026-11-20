@@ -2,13 +2,14 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  CAPABILITIES_MAX_COUNT, GRACE_HEADER, LAUNCHER_APPS_MAX_BYTES, LAUNCHER_APPS_MAX_COUNT, capabilitiesFrom,
-  cookieNames, encodeLauncherApps, hasCapability, isPageNavigation, launcherAppsFrom, originAllowed, originGuardMode,
-  parseLauncherApps, readPending, safeReturnTo, sessionFromClaims, sessionMode,
+  CAPABILITIES_MAX_COUNT, GRACE_HEADER, HUB_CAPABILITY_TIMEOUT_MS, HUB_TOKEN_TIMEOUT_MS, LAUNCHER_APPS_MAX_BYTES,
+  LAUNCHER_APPS_MAX_COUNT, capabilitiesFrom, cookieNames, encodeLauncherApps, hasCapability, isPageNavigation,
+  launcherAppsFrom, originAllowed, originGuardMode, parseLauncherApps, readPending, safeReturnTo, sessionFromClaims,
+  sessionMode,
 } from "./core";
 import { createHub } from "./hub";
 import { createSessionMiddleware, type AppSessionOptions } from "./middleware";
-import { readAppSession, readLauncherApps } from "./server";
+import { checkCapabilityNow, readAppSession, readLauncherApps } from "./server";
 
 const HUB = "https://auth.cgspectrum.com";
 const APP = "https://console.cgspectrum.com";
@@ -27,16 +28,24 @@ async function mint(over: Record<string, unknown> = {}, opts: { aud?: string; is
     .sign(opts.signer ?? key.privateKey);
 }
 
-// A stand-in hub: what /token answers is set per test.
-let hubState: { jwks: number; token: () => Promise<Response> | Response; calls: { url: string; body?: Record<string, string> }[] };
+// A stand-in hub: what /token and /capability answer is set per test.
+let hubState: {
+  jwks: number;
+  token: () => Promise<Response> | Response;
+  capability: () => Promise<Response> | Response;
+  calls: { url: string; body?: Record<string, string>; signal?: boolean }[];
+};
 const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
-  hubState.calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+  hubState.calls.push({
+    url, body: init?.body ? JSON.parse(String(init.body)) : undefined, signal: !!init?.signal,
+  });
   if (url.endsWith("/.well-known/jwks.json")) {
     if (hubState.jwks !== 200) return new Response("no", { status: hubState.jwks });
     return new Response(JSON.stringify(jwks), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (url.endsWith("/token")) return hubState.token();
+  if (url.endsWith("/capability")) return hubState.capability();
   return new Response("?", { status: 404 });
 }) as typeof fetch;
 const grant = async (over?: Parameters<typeof mint>[0], opts?: Parameters<typeof mint>[1]) =>
@@ -69,7 +78,12 @@ const forwarded = (res: Response) => res.headers.get("x-middleware-request-cooki
 
 beforeEach(() => {
   clock = Date.parse("2026-11-19T00:00:00Z");
-  hubState = { jwks: 200, token: () => new Response("{}", { status: 401 }), calls: [] };
+  hubState = {
+    jwks: 200,
+    token: () => new Response("{}", { status: 401 }),
+    capability: () => new Response("{}", { status: 401 }),
+    calls: [],
+  };
 });
 
 describe("settings", () => {
@@ -1099,5 +1113,196 @@ describe("⛔ capabilities and the launcher's list never reach each other", () =
     const cookie = setCookie(res, names.apps)!;
     expect(cookie).toContain(`${names.apps}=.home`);
     expect(cookie).not.toContain("reports");
+  });
+});
+
+// ── Asking the hub at the moment of the decision ────────────────────────────
+// ⛔ THREE WORDS, NEVER A BOOLEAN, and every test below says WHICH path
+// produced the word it checks: a real answer from the hub, a refusal from the
+// hub, or a decision taken here without asking at all.
+
+/** The hub's answer to a live check, whatever a test needs it to be. */
+const heldAnswer = (held: unknown) =>
+  new Response(JSON.stringify({ held }), { status: 200, headers: { "content-type": "application/json" } });
+const capabilityCalls = () => hubState.calls.filter((c) => c.url.endsWith("/capability"));
+/** A cookie jar, as server code is handed one. */
+const cookieJar = (cookies: Record<string, string>) => ({
+  get: (n: string) => (n in cookies ? { value: cookies[n] } : undefined),
+});
+
+describe("the live capability check: the hub's answer, and only the hub's", () => {
+  it('"held" only on a real 200 saying true, in this very call', async () => {
+    const { hub } = setup();
+    hubState.capability = () => heldAnswer(true);
+    const token = await mint({ caps: ["values"] });
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: token }), undefined, "values")).toBe("held");
+    // Source: one POST, carrying this app's key, this token and this key.
+    expect(capabilityCalls()).toHaveLength(1);
+    expect(capabilityCalls()[0].body).toEqual({ app: "console", token, capability: "values" });
+    // And it is given a deadline of its own.
+    expect(capabilityCalls()[0].signal).toBe(true);
+  });
+
+  it('200 false and 401 are both "not_held", and nothing else is', async () => {
+    const { hub } = setup();
+    const token = await mint({ caps: ["values"] });
+    const jar = cookieJar({ [names.token]: token });
+
+    hubState.capability = () => heldAnswer(false);
+    expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("not_held");
+
+    hubState.capability = () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 401 });
+    expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("not_held");
+    // Source: the hub answered both times.
+    expect(capabilityCalls()).toHaveLength(2);
+  });
+
+  it('⛔ the signed claim never answers this question: a token carrying the key is still "not_held" when the hub says no', async () => {
+    const { hub } = setup();
+    hubState.capability = () => heldAnswer(false);
+    const token = await mint({ caps: ["values"] });
+    const session = await hub.check(token);
+    // The claim says yes, which is what draws the tab...
+    expect(hasCapability(session.state === "valid" ? session.session : null, "values")).toBe(true);
+    // ...and the hub says no, which is what decides the page.
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: token }), undefined, "values")).toBe("not_held");
+  });
+
+  it('⛔ every way the hub can fail is "unavailable", and never "held"', async () => {
+    const { hub } = setup();
+    const token = await mint({ caps: ["values"] });
+    const jar = cookieJar({ [names.token]: token });
+    const timedOut = () => { throw Object.assign(new Error("stopped waiting"), { name: "TimeoutError" }); };
+    const failures: (() => Response)[] = [
+      timedOut,
+      down,                                                        // a network error
+      () => new Response("boom", { status: 500 }),
+      () => busy("1") as Response,                                 // 503, the hub is behind
+      () => new Response("not found", { status: 404 }),            // per-app sessions switched off
+      () => new Response(JSON.stringify({ error: "invalid_request" }), { status: 400 }),
+      () => new Response("{ not json", { status: 200 }),           // unparseable
+      () => heldAnswer("yes"),                                     // a 200 that is not an answer
+      () => heldAnswer(1),
+      () => heldAnswer(undefined),
+      () => new Response(JSON.stringify([true]), { status: 200 }),
+    ];
+    for (const answer of failures) {
+      hubState.capability = answer;
+      expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("unavailable");
+    }
+  });
+
+  it("⛔ no token: not_held, and the hub is never called", async () => {
+    const { hub } = setup();
+    hubState.capability = () => heldAnswer(true);
+    expect(await checkCapabilityNow(hub, true, cookieJar({}), undefined, "values")).toBe("not_held");
+    expect(capabilityCalls()).toEqual([]);
+  });
+
+  it("⛔ a token this app would not accept: not_held, and the hub is never called", async () => {
+    const { hub } = setup();
+    hubState.capability = () => heldAnswer(true);
+    const forged = await mint({ caps: ["values"] }, { signer: other.privateKey });
+    const forAnother = await mint({ caps: ["values"] }, { aud: "ops" });
+    for (const bad of [forged, forAnother, "not-a-token"]) {
+      expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: bad }), undefined, "values")).toBe("not_held");
+    }
+    expect(capabilityCalls()).toEqual([]);
+  });
+
+  it("⛔ never throws, whatever it is handed", async () => {
+    const { hub } = setup();
+    hubState.capability = () => heldAnswer(true);
+    const angry = { get: () => { throw new Error("no cookies for you"); } };
+    expect(await checkCapabilityNow(hub, true, angry, undefined, "values")).toBe("unavailable");
+    const angryHeaders = { get: () => { throw new Error("no headers either"); } };
+    const token = await mint({ caps: ["values"] });
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: token }), angryHeaders, "values"))
+      .toBe("unavailable");
+  });
+});
+
+describe("⛔ the live check has no grace, and the hub-down grace never becomes a yes", () => {
+  it("an expired token on the grace path is not_held, and the hub is not asked", async () => {
+    const { hub } = setup();
+    const old = await mint({ caps: ["values"] });
+    await hub.check(old);
+    hubState.capability = () => heldAnswer(true);
+    clock += 20 * 60 * 1000; // five minutes past its time, inside the hour's grace
+
+    // Ordinary browsing is carried on this token: that is the existing grace.
+    expect((await readAppSession(hub, true, cookieJar({ [names.token]: old }), new Headers({ [GRACE_HEADER]: "1" })))?.sid)
+      .toBe("s1");
+    // ⛔ And a sensitive decision is not, and the hub is never asked.
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: old }), new Headers({ [GRACE_HEADER]: "1" }), "values"))
+      .toBe("not_held");
+    expect(capabilityCalls()).toEqual([]);
+    // The same token without the marker is expired, so it is refused here too.
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: old }), undefined, "values")).toBe("not_held");
+    expect(capabilityCalls()).toEqual([]);
+  });
+
+  it("the pause after a hub failure does not gag it, and never turns into held", async () => {
+    const { hub } = setup();
+    // A renewal fails, so renewals are answered "unreachable" without calling.
+    hubState.token = () => busy("5");
+    expect(await hub.renew("h1")).toEqual({ ok: false, reason: "unreachable" });
+    expect(await hub.renew("h1")).toEqual({ ok: false, reason: "unreachable" });
+    expect(hubState.calls.filter((c) => c.url.endsWith("/token"))).toHaveLength(1);
+
+    // ⚖️ The live check still asks. Source: a real 200 in this call.
+    hubState.capability = () => heldAnswer(true);
+    const token = await mint({ caps: ["values"] });
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: token }), undefined, "values")).toBe("held");
+    expect(capabilityCalls()).toHaveLength(1);
+    // And it did not lengthen the pause for renewals either.
+    expect(await hub.renew("h1")).toEqual({ ok: false, reason: "unreachable" });
+  });
+});
+
+describe("the live check presents the token this request holds", () => {
+  it("a just-renewed request presents the NEW token, not the one the browser sent", async () => {
+    const old = await mint({ caps: ["values"] }, { ttl: 30 });
+    const fresh = await mint({ caps: ["values"] });
+    hubState.token = () => new Response(
+      JSON.stringify({ token: fresh, handle: "h-next", expires_in: 900 }), { status: 200 },
+    );
+    const { handle, hub } = setup();
+    const res = (await handle(request("/", { cookies: { [names.token]: old, [names.handle]: "h1" } })))!;
+    // The middleware renewed and rewrote the request's own cookies, which is
+    // what server code reads from. Rebuild that jar exactly as Next hands it on.
+    const jar = cookieJar(Object.fromEntries(
+      forwarded(res).split("; ").map((pair) => {
+        const at = pair.indexOf("=");
+        return [pair.slice(0, at), pair.slice(at + 1)];
+      }),
+    ));
+    expect(fresh).not.toBe(old);
+
+    hubState.capability = () => heldAnswer(true);
+    expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("held");
+    // ⚖️ THE POINT: the token presented is the one issued on this request.
+    expect(capabilityCalls()[0].body).toEqual({ app: "console", token: fresh, capability: "values" });
+    expect(capabilityCalls()[0].body!.token).not.toBe(old);
+  });
+});
+
+describe("the live check's deadline", () => {
+  it("is its own, and shorter than the one a renewal waits", () => {
+    expect(HUB_CAPABILITY_TIMEOUT_MS).toBe(4000);
+    expect(HUB_CAPABILITY_TIMEOUT_MS).toBeLessThan(HUB_TOKEN_TIMEOUT_MS);
+  });
+
+  it("⛔ logs a reason word and never a value", async () => {
+    const said: string[] = [];
+    const { hub } = setup({ log: (m) => said.push(m) });
+    hubState.capability = () => new Response("boom", { status: 500 });
+    const token = await mint({ caps: ["values"] });
+    expect(await checkCapabilityNow(hub, true, cookieJar({ [names.token]: token }), undefined, "values"))
+      .toBe("unavailable");
+    expect(said).toEqual(["capability check unavailable: status 500"]);
+    for (const line of said) {
+      for (const value of [token, "values"]) expect(line).not.toContain(value);
+    }
   });
 });
