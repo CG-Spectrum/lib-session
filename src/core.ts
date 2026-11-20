@@ -29,6 +29,14 @@ export function originGuardMode(raw: string | undefined, mode: SessionMode): Ori
   return mode === "shared" ? "off" : "enforce";
 }
 
+// How long to wait for the hub's answer on a /token call.
+//
+// The app's clock starts before the hub's handler does. A cold start on either
+// side can use up most of a short wait, and the hub can then answer just after
+// the app has given up, having already acted on what it was sent. Waiting
+// longer costs little: a hub that is really down is remembered as busy after
+// the first failure, so the wait is paid once and not by every request.
+export const HUB_TOKEN_TIMEOUT_MS = 8000;
 // Renew this long before a token runs out, so a page never starts with one
 // about to expire.
 export const RENEW_EARLY_SECONDS = 60;
@@ -49,6 +57,10 @@ export function cookieNames(secure: boolean) {
     handle: `${p}cgsi.session-handle`,
     state: `${p}cgsi.session-state`,
     tried: `${p}cgsi.session-tried`,
+    // One fresh sign-in has already been started because the hub could not
+    // answer. Lives as long as a pending sign-in can (STATE_TTL_SECONDS), so a
+    // second one cannot be started while the first is still good.
+    restarted: `${p}cgsi.session-restarted`,
   };
 }
 
