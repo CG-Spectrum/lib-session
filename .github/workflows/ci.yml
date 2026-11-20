@@ -1,0 +1,41 @@
+name: ci
+
+# Typecheck and the unit suite, on every push and pull request.
+#
+# This package is a library: nothing deploys from a push here. Apps pick a
+# change up only when they bump the tag they pin, so this workflow can block a
+# bad change before any app sees it.
+#
+# No secrets: every dependency is public.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
