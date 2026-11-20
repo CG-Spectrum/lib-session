@@ -39,6 +39,11 @@ export async function readAppSession(
  * apply to, or nothing usable in the cookie. That is NOT an empty list, and an
  * app moving off the shared cookie should fall back to its old source on null
  * and show nothing on `[]`.
+ *
+ * ⚖️ THE ONE THAT MAY DECIDE IS THE OTHER ONE. If the question is "may this
+ * person do X here", the answer is `hasCapability(session, "x")`, which reads
+ * the verified token. This function answers "what tiles shall I draw" and
+ * nothing else.
  */
 export function readLauncherApps(secure: boolean, cookies: CookieReader): string[] | null {
   return parseLauncherApps(cookies.get(cookieNames(secure).apps)?.value);
