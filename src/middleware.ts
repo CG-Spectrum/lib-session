@@ -10,8 +10,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   COOKIE_MAX_AGE_SECONDS, GRACE_HEADER, HUB_DOWN_GRACE_SECONDS, RENEW_EARLY_SECONDS, RETRY_AFTER_SECONDS,
-  STATE_TTL_SECONDS, challengeFor, cookieNames, isPageNavigation, originAllowed, randomValue, readPending,
-  type OriginGuardMode, type SessionMode,
+  STATE_TTL_SECONDS, challengeFor, cookieNames, encodeLauncherApps, isPageNavigation, originAllowed, randomValue,
+  readPending, type OriginGuardMode, type SessionMode,
 } from "./core";
 import { createHub, type Hub, type HubOptions } from "./hub";
 
@@ -49,8 +49,17 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
   const clearOwn = (res: NextResponse) => {
     res.cookies.set(names.token, "", cookie(0));
     res.cookies.set(names.handle, "", cookie(0));
+    res.cookies.set(names.apps, "", cookie(0));
     return res;
   };
+  /**
+   * The launcher's list, stored for exactly as long as the token is. A grant
+   * that carried no list CLEARS it rather than leaving the last one behind:
+   * the cookie says what the hub last said, and "the hub said nothing" has to
+   * stay tellable from "the hub said none".
+   */
+  const setLauncherApps = (res: NextResponse, apps: string[] | null) =>
+    res.cookies.set(names.apps, apps ? encodeLauncherApps(apps) : "", cookie(apps ? COOKIE_MAX_AGE_SECONDS : 0));
   const noStore = (res: NextResponse) => {
     res.headers.set("Cache-Control", "no-store");
     return res;
@@ -60,8 +69,16 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
    * Pass the request on. `fresh`: a token was just issued, so server code gets
    * it now. `dead`: the hub ended this session, so server code must not see
    * the old token at all, even if it has seconds left on it.
+   *
+   * The launcher's list travels with the token, by the same route and on the
+   * same request: a renewal that brought a new list hands it to server code
+   * now, not on the next page load.
    */
-  function pass(req: NextRequest, change?: { token: string; handle: string } | "dead", grace = false) {
+  function pass(
+    req: NextRequest,
+    change?: { token: string; handle: string; launcherApps: string[] | null } | "dead",
+    grace = false,
+  ) {
     const headers = new Headers(req.headers);
     headers.delete(GRACE_HEADER); // never trust one a browser sent
     if (grace) headers.set(GRACE_HEADER, "1");
@@ -71,9 +88,12 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
       if (change === "dead") {
         jar.delete(names.token);
         jar.delete(names.handle);
+        jar.delete(names.apps);
       } else {
         jar.set(names.token, change.token);
         jar.set(names.handle, change.handle);
+        if (change.launcherApps) jar.set(names.apps, encodeLauncherApps(change.launcherApps));
+        else jar.delete(names.apps);
       }
       const value = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
       if (value) headers.set("cookie", value);
@@ -84,6 +104,7 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
     if (change) {
       res.cookies.set(names.token, change.token, cookie(COOKIE_MAX_AGE_SECONDS));
       res.cookies.set(names.handle, change.handle, cookie(COOKIE_MAX_AGE_SECONDS));
+      setLauncherApps(res, change.launcherApps);
     }
     return res;
   }
@@ -140,6 +161,7 @@ export function createSessionMiddleware(o: AppSessionOptions, hub: Hub = createH
     const res = back(pending.r);
     res.cookies.set(names.token, granted.token, cookie(COOKIE_MAX_AGE_SECONDS));
     res.cookies.set(names.handle, granted.handle, cookie(COOKIE_MAX_AGE_SECONDS));
+    setLauncherApps(res, granted.launcherApps);
     res.cookies.set(names.tried, "", cookie(0));
     res.cookies.set(names.restarted, "", cookie(0));
     return res;
