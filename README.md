@@ -44,8 +44,9 @@ if (r) return r;
 
 ```ts
 // server code
-import { readAppSession } from "@cgsi/session/server";
+import { readAppSession, readLauncherApps } from "@cgsi/session/server";
 const session = await readAppSession(hub, secure, await cookies(), await headers());
+const launcherApps = readLauncherApps(secure, await cookies()); // tiles only, see below
 ```
 
 Add the package to `transpilePackages` in `next.config` (it ships source).
@@ -99,12 +100,58 @@ ends the session at once. This is the existing grace design, which already
 carries a person for up to an hour on a hub that cannot answer; the pause adds
 seconds to a window measured in minutes.
 
+## The launcher's list of apps
+
+The hub sends the person's app keys beside the token at every grant and
+renewal. This package stores them in `__Host-cgsi.session-apps` and hands them
+back through `readLauncherApps(secure, cookies)`, so a launcher can draw tiles
+without the app knowing anything else about what the person can open.
+
+**⛔ It is a display list. It decides nothing.** It is not a claim in the
+token, so nothing about it is signed; it sits in a cookie, and a person who
+opens their own browser's storage can put whatever they like in it. The most a
+changed value can do is show somebody a tile that refuses them when they click
+it, which is what a revoked grant does today anyway. If the question is "may
+this person do X", the answer is the token's claims or the app's own gate,
+never this. It is named `launcherApps` everywhere for that reason.
+
+It is read and written through one rule: an array of app keys
+(`^[a-z][a-z0-9-]{1,40}$`), at most 40 of them, at most 1024 bytes stored.
+Today's whole estate is 24 keys and 262 bytes, against roughly 4096 a browser
+will carry. Anything else is treated as **absent** and never throws.
+
+`null` (absent) and `[]` (empty) are different answers and must stay that way:
+
+| What came back | Means | What an app should do |
+|---|---|---|
+| `null` | the hub sent no list: an older hub, a person it does not apply to, or nothing usable in the cookie | fall back to its current source |
+| `[]` | the hub sent a list and it is empty | show no tiles |
+
+A renewal carries the list on the same request that renewed, exactly as the
+new token does, so server code sees it at once. A grant that carries no list
+clears the cookie rather than leaving the last one behind, and it is cleared
+wherever the other cookies are: sign-out, a session the hub has ended, and any
+refusal.
+
 ## Cookies
 
-`__Host-cgsi.session`, `__Host-cgsi.session-handle` (and three short-lived
-helpers). Host-only, HttpOnly, Secure, SameSite=Lax. Never a parent domain.
+`__Host-cgsi.session`, `__Host-cgsi.session-handle`,
+`__Host-cgsi.session-apps` (and three short-lived helpers). Host-only,
+HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### 0.1.3
+
+- The launcher's list of apps, when the hub sends one, is stored in
+  `__Host-cgsi.session-apps` and read with `readLauncherApps`. ⛔ Unsigned and
+  for display only: nothing here uses it to decide anything, and nor should an
+  app. See **The launcher's list of apps** above.
+- A hub that sends no list, or one this package cannot use, leaves no list.
+  Absent is not the same as empty, and an app can tell them apart while it
+  moves off its old source.
+- Nothing else changed. Against a hub that does not send the list, 0.1.3
+  behaves exactly as 0.1.2 did.
 
 ### 0.1.2
 
