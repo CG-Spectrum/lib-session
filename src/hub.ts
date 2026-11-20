@@ -1,6 +1,6 @@
 // Talking to the sign-in hub: checking a token, and the two /token calls.
 import { createRemoteJWKSet, customFetch, errors, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { HUB_TOKEN_TIMEOUT_MS, sessionFromClaims, type AppSession } from "./core";
+import { HUB_TOKEN_TIMEOUT_MS, launcherAppsFrom, sessionFromClaims, type AppSession } from "./core";
 
 export interface HubOptions {
   /** This app's key in the hub's registry, e.g. "console". */
@@ -23,7 +23,17 @@ export type TokenCheck =
   | { state: "invalid" };
 
 export type TokenGrant =
-  | { ok: true; token: string; handle: string }
+  | {
+      ok: true;
+      token: string;
+      handle: string;
+      /**
+       * The launcher's list of apps, or null when the hub sent none it could
+       * use. ⛔ UNSIGNED AND FOR DISPLAY ONLY (see core.ts). Null is "the hub
+       * said nothing", which is not the same as "the hub said none".
+       */
+      launcherApps: string[] | null;
+    }
   /** The hub answered and said no: sign in again (invalid) or not allowed (no_access). */
   | { ok: false; reason: "invalid" | "no_access" }
   /** The hub could not be reached, or is broken. Not a refusal. */
@@ -117,9 +127,13 @@ export function createHub(o: HubOptions): Hub {
     if (res.status === 403) return { ok: false, reason: "no_access" };
     if (res.status !== 200) return nothingToGive(res);
     try {
-      const j = (await res.json()) as { token?: unknown; handle?: unknown };
+      const j = (await res.json()) as { token?: unknown; handle?: unknown; apps?: unknown };
       if (typeof j.token !== "string" || typeof j.handle !== "string") return nothingToGive(res);
-      return { ok: true, token: j.token, handle: j.handle };
+      // A hub that does not send `apps` at all, and anything that is not a
+      // sound list of app keys, both come out as null: no list. ⛔ Never an
+      // empty one, and never a reason to fail the grant. The token is what a
+      // grant is for; the launcher's list is decoration on top of it.
+      return { ok: true, token: j.token, handle: j.handle, launcherApps: launcherAppsFrom(j.apps) };
     } catch {
       return nothingToGive(res);
     }
