@@ -2,8 +2,9 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  GRACE_HEADER, LAUNCHER_APPS_MAX_BYTES, LAUNCHER_APPS_MAX_COUNT, cookieNames, encodeLauncherApps, isPageNavigation,
-  launcherAppsFrom, originAllowed, originGuardMode, parseLauncherApps, readPending, safeReturnTo, sessionMode,
+  CAPABILITIES_MAX_COUNT, GRACE_HEADER, LAUNCHER_APPS_MAX_BYTES, LAUNCHER_APPS_MAX_COUNT, capabilitiesFrom,
+  cookieNames, encodeLauncherApps, hasCapability, isPageNavigation, launcherAppsFrom, originAllowed, originGuardMode,
+  parseLauncherApps, readPending, safeReturnTo, sessionFromClaims, sessionMode,
 } from "./core";
 import { createHub } from "./hub";
 import { createSessionMiddleware, type AppSessionOptions } from "./middleware";
@@ -963,7 +964,140 @@ describe("the launcher's list: server code reading it", () => {
     expect(session).not.toHaveProperty("launcherApps");
     expect(session).not.toHaveProperty("apps");
     expect(Object.keys(session!).sort()).toEqual(
-      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "role", "sid", "subject"],
+      ["appRole", "capabilities", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "role", "sid",
+        "subject"],
     );
+    // ⛔ And the cookie's `.admin` did not become a capability either.
+    expect(session!.capabilities).toEqual([]);
+  });
+});
+
+// ── This app's own capabilities ─────────────────────────────────────────────
+// ✅ THE SIGNED ONE. Every test below says which SOURCE decided the value it
+// checks: the token's `caps` claim, the apps cookie, or neither.
+
+describe("capabilities: what counts as one", () => {
+  it("app keys only, and anything else is NO capabilities rather than an error", () => {
+    expect(capabilitiesFrom(["reports"])).toEqual(["reports"]);
+    expect(capabilitiesFrom(["reports", "bulk-export"])).toEqual(["reports", "bulk-export"]);
+    expect(capabilitiesFrom([])).toEqual([]);
+    // ⛔ Each of these is empty, and none of them throws.
+    expect(capabilitiesFrom(undefined)).toEqual([]);     // a hub older than the claim
+    expect(capabilitiesFrom(null)).toEqual([]);
+    expect(capabilitiesFrom("reports")).toEqual([]);     // not an array
+    expect(capabilitiesFrom({ 0: "reports", length: 1 })).toEqual([]);
+    expect(capabilitiesFrom(["reports", 7])).toEqual([]);
+    expect(capabilitiesFrom(["reports", null])).toEqual([]);
+    expect(capabilitiesFrom(["Reports"])).toEqual([]);
+    expect(capabilitiesFrom(["1reports"])).toEqual([]);
+    expect(capabilitiesFrom(["r"])).toEqual([]);
+    expect(capabilitiesFrom(["a b"])).toEqual([]);
+  });
+
+  it("the count is bounded, and the bound is reached one entry at a time", () => {
+    const full = Array.from({ length: CAPABILITIES_MAX_COUNT }, (_, i) => `cap-${String(i).padStart(2, "0")}`);
+    expect(capabilitiesFrom(full)).toHaveLength(CAPABILITIES_MAX_COUNT);
+    expect(capabilitiesFrom([...full, "reports"])).toEqual([]);
+  });
+
+  it("⛔ one bad entry voids the whole list rather than being dropped quietly", () => {
+    expect(capabilitiesFrom(["reports", "Exports"])).toEqual([]);
+  });
+});
+
+describe("capabilities: read from the token's claims", () => {
+  const claims = (over: Record<string, unknown> = {}) =>
+    ({ sid: "s1", email: "A@example.com", gsub: "g1", lprov: "workos", kind: "staff", role: "staff", exp: 1, ...over });
+
+  it("a valid list is the session's capabilities", () => {
+    // Source: the `caps` claim.
+    expect(sessionFromClaims(claims({ caps: ["reports", "bulk-export"] }))?.capabilities)
+      .toEqual(["reports", "bulk-export"]);
+  });
+
+  it("⛔ every unusable shape is EMPTY, and the session is still returned whole", () => {
+    for (const bad of [undefined, null, "reports", 7, { reports: true }, ["Reports"], ["reports", 7], [""],
+      Array.from({ length: CAPABILITIES_MAX_COUNT + 1 }, () => "reports")]) {
+      const session = sessionFromClaims(claims({ caps: bad }));
+      // ⛔ Not a null session and not a throw: a claim this package cannot
+      // read costs the person no capabilities and nothing else.
+      expect(session).not.toBeNull();
+      expect(session!.capabilities).toEqual([]);
+      expect(session!.email).toBe("a@example.com");
+      expect(session!.role).toBe("staff");
+    }
+  });
+
+  it("a token with no claim at all behaves exactly as 0.1.3 did", () => {
+    const before = sessionFromClaims(claims());
+    const after = sessionFromClaims(claims({ caps: [] }));
+    // Every field 0.1.3 had, with the same values, and the new one empty in
+    // both: absent and empty are ONE answer here, on purpose.
+    expect(before).toEqual(after);
+    expect(before).toEqual({
+      sid: "s1", email: "a@example.com", name: null, subject: "g1", loginProvider: "workos",
+      kind: "staff", role: "staff", departments: [], appRole: null, capabilities: [], expiresAt: 1,
+    });
+  });
+});
+
+describe("capabilities: asking the question", () => {
+  it("true for a key the token carries, false for one it does not", async () => {
+    const { hub } = setup();
+    const checked = await hub.check(await mint({ caps: ["reports"] }));
+    const session = checked.state === "valid" ? checked.session : null;
+    // Source: the verified token, on both answers.
+    expect(hasCapability(session, "reports")).toBe(true);
+    expect(hasCapability(session, "bulk-export")).toBe(false);
+  });
+
+  it("⛔ nobody signed in holds nothing", () => {
+    expect(hasCapability(null, "reports")).toBe(false);
+    expect(hasCapability(undefined, "reports")).toBe(false);
+  });
+
+  it("a forged token is nobody, so it carries no capability either", async () => {
+    const { hub } = setup();
+    const forged = await mint({ caps: ["reports"] }, { signer: other.privateKey });
+    const checked = await hub.check(forged);
+    expect(checked.state).not.toBe("valid");
+    expect(hasCapability(checked.state === "valid" ? checked.session : null, "reports")).toBe(false);
+  });
+});
+
+describe("⛔ capabilities and the launcher's list never reach each other", () => {
+  const jar = (cookies: Record<string, string>) => ({
+    get: (n: string) => (n in cookies ? { value: cookies[n] } : undefined),
+  });
+
+  it("a cookie full of keys adds no capability", async () => {
+    const { hub } = setup();
+    const token = await mint({ caps: ["reports"] });
+    const cookies = { [names.token]: token, [names.apps]: ".admin.finance.bulk-export" };
+    const session = await readAppSession(hub, true, jar(cookies));
+    // Source: the token. The cookie contributed nothing at all.
+    expect(session!.capabilities).toEqual(["reports"]);
+    expect(hasCapability(session, "bulk-export")).toBe(false);
+    expect(hasCapability(session, "admin")).toBe(false);
+  });
+
+  it("a token full of capabilities adds nothing to the launcher's list", async () => {
+    const { hub } = setup();
+    const token = await mint({ caps: ["reports", "bulk-export"] });
+    const cookies = { [names.token]: token, [names.apps]: ".home" };
+    expect((await readAppSession(hub, true, jar(cookies)))!.capabilities).toEqual(["reports", "bulk-export"]);
+    // Source: the cookie, and only the cookie.
+    expect(readLauncherApps(true, jar(cookies))).toEqual(["home"]);
+    expect(readLauncherApps(true, jar({ [names.token]: token }))).toBeNull();
+  });
+
+  it("the claim is not stored in the apps cookie, nor read back from one", async () => {
+    hubState.token = () => grantWithApps(["home"], { caps: ["reports"] });
+    const res = (await setup().handle(request("/", {
+      cookies: { [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1" },
+    })))!;
+    const cookie = setCookie(res, names.apps)!;
+    expect(cookie).toContain(`${names.apps}=.home`);
+    expect(cookie).not.toContain("reports");
   });
 });
