@@ -130,6 +130,60 @@ export function parseLauncherApps(raw: string | undefined): string[] | null {
   return raw === "." ? [] : launcherAppsFrom(raw.slice(1).split("."));
 }
 
+// ── This app's own capabilities ─────────────────────────────────────────────
+// ✅ SIGNED, AND IT IS THE ONE THAT MAY DECIDE.
+//
+// Several apps make a second decision from a second key: a reports page only
+// some people may open, an editor only some people may use. The hub signs
+// those keys into the token as `caps`, so an app can decide from them with the
+// same confidence it decides anything else from the token.
+//
+// ⚖️ THE PAIR, SAID ONCE, BECAUSE CONFUSING THEM IS THE WHOLE RISK:
+//
+//   capabilities   from the VERIFIED token. Signed by the hub, for this app
+//                  alone. ✅ May decide. Reached through `hasCapability` or
+//                  `session.capabilities`.
+//   launcherApps   from a COOKIE. Unsigned; a person can put anything in it.
+//                  ⛔ May not decide anything, ever. Reached through
+//                  `readLauncherApps`, which is deliberately not part of a
+//                  session at all.
+//
+// They are named differently, they are read through different functions, and
+// one is a field of `AppSession` while the other can never be. If a reader has
+// to think about which is which, this file has failed.
+//
+// ⚖️ WHAT THE HUB WILL AND WILL NOT PUT IN IT. Only keys the asking app has
+// declared in the hub's registry, and only those the person actually holds. An
+// app is never told about a key belonging to another app, however many the
+// person holds, so a capability says what this person may do HERE and nothing
+// about anywhere else.
+const CAPABILITY_KEY = /^[a-z][a-z0-9-]{1,40}$/;
+/**
+ * The most keys a token may carry. One app's own sub-grants are a handful
+ * today; this is room to grow and still a bound on a claim this package did
+ * not write.
+ */
+export const CAPABILITIES_MAX_COUNT = 24;
+
+/**
+ * The capabilities in a verified token's claims.
+ *
+ * ⛔ FAILS CLOSED AND NEVER THROWS. Absent (an older hub), not an array, or
+ * anything in it that is not an app key, all mean NO capabilities. There is no
+ * "absent" answer to tell from "empty" here, on purpose: a capability has no
+ * older source to fall back to, so either the signed token says the person has
+ * it or they do not. One meaning, and it is the safe one.
+ */
+export function capabilitiesFrom(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > CAPABILITIES_MAX_COUNT) return [];
+  const caps: string[] = [];
+  for (const v of value) {
+    if (typeof v !== "string" || !CAPABILITY_KEY.test(v)) return [];
+    caps.push(v);
+  }
+  return caps;
+}
+
 /** Set by the middleware on the request it passes on; any value a browser sent is removed first. */
 export const GRACE_HEADER = "x-cgsi-session-grace";
 
@@ -224,6 +278,14 @@ export interface AppSession {
    * off, or a read that failed). ⛔ Display only: see `showsPermission`.
    */
   permissions: string[] | null;
+   * ✅ THE SIGNED ONE. This app's own sub-grant keys that the person holds,
+   * from the verified token, so it MAY be decided from. Empty when the hub
+   * sent none, which includes every hub older than this claim.
+   *
+   * ⛔ Not to be confused with `readLauncherApps`, which comes from a cookie,
+   * is unsigned and may decide nothing. See "This app's own capabilities".
+   */
+  capabilities: string[];
   /** When the token runs out (seconds since 1970). */
   expiresAt: number;
 }
@@ -239,6 +301,24 @@ export function sessionFromClaims(p: Record<string, unknown>): AppSession | null
     departments: Array.isArray(p.departments) ? p.departments.filter(str) : [],
     appRole: str(p.appRole) ? p.appRole : null,
     permissions: Array.isArray(p.permissions) ? p.permissions.filter(str) : null,
+    // ⛔ A claim this package cannot read is NO capabilities, and never a
+    // reason to refuse the session: everything else in the token is still
+    // good, and an app on an older hub, which sends no claim at all, goes on
+    // working exactly as it did.
+    capabilities: capabilitiesFrom(p.caps),
     expiresAt: p.exp,
   };
+}
+
+/**
+ * Does this person hold one of THIS APP's capabilities?
+ *
+ *   if (!hasCapability(session, "reports")) return notFound();
+ *
+ * ✅ The answer comes from the verified token and nowhere else. Nobody is
+ * signed in (a null session) is false, so a gate written this way fails closed
+ * without the caller remembering to check.
+ */
+export function hasCapability(session: AppSession | null | undefined, key: string): boolean {
+  return !!session && session.capabilities.includes(key);
 }
