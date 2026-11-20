@@ -2,11 +2,12 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  GRACE_HEADER, cookieNames, isPageNavigation, originAllowed, originGuardMode, readPending, safeReturnTo, sessionMode,
+  GRACE_HEADER, LAUNCHER_APPS_MAX_BYTES, LAUNCHER_APPS_MAX_COUNT, cookieNames, encodeLauncherApps, isPageNavigation,
+  launcherAppsFrom, originAllowed, originGuardMode, parseLauncherApps, readPending, safeReturnTo, sessionMode,
 } from "./core";
 import { createHub } from "./hub";
 import { createSessionMiddleware, type AppSessionOptions } from "./middleware";
-import { readAppSession } from "./server";
+import { readAppSession, readLauncherApps } from "./server";
 
 const HUB = "https://auth.cgspectrum.com";
 const APP = "https://console.cgspectrum.com";
@@ -727,5 +728,242 @@ describe("server code reading the session", () => {
     const forged = await mint({ role: "admin" }, { signer: other.privateKey });
     clock += 30 * 60 * 1000;
     expect(await readAppSession(hub, true, jar(forged), new Headers({ [GRACE_HEADER]: "1" }))).toBeNull();
+  });
+});
+
+// ── The launcher's list of apps ─────────────────────────────────────────────
+// ⛔ A DISPLAY LIST. Every test below says which SOURCE decided the value it
+// checks: the hub's answer, the cookie the browser sent, or neither.
+
+/** A /token answer carrying whatever the hub put in `apps`. */
+const grantWithApps = async (apps: unknown, over?: Parameters<typeof mint>[0]) =>
+  new Response(JSON.stringify({ token: await mint(over), handle: "h-next", expires_in: 900, apps }), { status: 200 });
+/** The 0.1.2 answer: no `apps` field at all. */
+const grantWithoutApps = async () =>
+  new Response(JSON.stringify({ token: await mint(), handle: "h-next", expires_in: 900 }), { status: 200 });
+const appsCookie = (res: Response) => setCookie(res, names.apps);
+const jarOf = (cookies: Record<string, string>) => ({
+  get: (n: string) => (n in cookies ? { value: cookies[n] } : undefined),
+});
+
+describe("the launcher's list: what counts as one", () => {
+  it("app keys only, and anything else is NO list rather than an empty one", () => {
+    expect(launcherAppsFrom(["home", "marketing-events-publish"])).toEqual(["home", "marketing-events-publish"]);
+    expect(launcherAppsFrom([])).toEqual([]);
+    // ⛔ Each of these is absent, and none of them throws.
+    expect(launcherAppsFrom(undefined)).toBeNull();          // an older hub
+    expect(launcherAppsFrom(null)).toBeNull();
+    expect(launcherAppsFrom("home,people")).toBeNull();      // not an array
+    expect(launcherAppsFrom({ 0: "home", length: 1 })).toBeNull();
+    expect(launcherAppsFrom(["home", 7])).toBeNull();        // not all strings
+    expect(launcherAppsFrom(["home", null])).toBeNull();
+    expect(launcherAppsFrom(["Home"])).toBeNull();           // not the key shape
+    expect(launcherAppsFrom(["1home"])).toBeNull();
+    expect(launcherAppsFrom(["h"])).toBeNull();
+    expect(launcherAppsFrom(["home.people"])).toBeNull();    // the separator itself
+    expect(launcherAppsFrom(["a b"])).toBeNull();
+  });
+
+  it("the two bounds are reached one at a time, so neither hides the other", () => {
+    const short = Array.from({ length: LAUNCHER_APPS_MAX_COUNT }, () => "home");
+    expect(launcherAppsFrom(short)).toHaveLength(LAUNCHER_APPS_MAX_COUNT);
+    expect(launcherAppsFrom([...short, "home"])).toBeNull();           // one too many
+    // Twenty-five of the longest key a hub will ever issue: well inside the
+    // count, and past what a cookie should carry.
+    const long = Array.from({ length: 25 }, () => `a${"b".repeat(40)}`);
+    expect(long.length).toBeLessThan(LAUNCHER_APPS_MAX_COUNT);
+    expect(encodeLauncherApps(long).length).toBeGreaterThan(LAUNCHER_APPS_MAX_BYTES);
+    expect(launcherAppsFrom(long)).toBeNull();                          // too large
+  });
+
+  it("the whole of today's estate fits with room to spare", () => {
+    // The hub's canonical order, 20 November 2026. The worst list anybody can
+    // actually hold, measured rather than guessed.
+    const estate = [
+      "home", "product", "productedit", "productadmin", "people", "values", "marketing", "marketing-events",
+      "marketing-events-publish", "sales", "leadership", "scheduling", "scheduleedit", "studentreporting",
+      "mentorcost", "placementsedit", "placementsadmin", "finance", "partnerships", "cms", "audit", "governance",
+      "launchpad", "admin",
+    ];
+    expect(estate).toHaveLength(24);
+    expect(encodeLauncherApps(estate)).toHaveLength(262);
+    expect(launcherAppsFrom(estate)).toEqual(estate);
+    // Name, "=", value: what the browser actually carries, against its ~4096.
+    expect(`${names.apps}=${encodeLauncherApps(estate)}`.length).toBeLessThan(300);
+  });
+
+  it("a cookie value survives the round trip, and an EMPTY list is not an ABSENT one", () => {
+    expect(parseLauncherApps(encodeLauncherApps(["home", "people"]))).toEqual(["home", "people"]);
+    expect(parseLauncherApps(encodeLauncherApps([]))).toEqual([]);
+    expect(encodeLauncherApps([])).toBe(".");
+    // ⛔ No cookie, a cleared cookie and rubbish in one are all ABSENT.
+    expect(parseLauncherApps(undefined)).toBeNull();
+    expect(parseLauncherApps("")).toBeNull();
+    expect(parseLauncherApps("home.people")).toBeNull();   // no leading marker
+    expect(parseLauncherApps(".home..people")).toBeNull(); // an empty key
+    expect(parseLauncherApps(`.${"x".repeat(LAUNCHER_APPS_MAX_BYTES)}`)).toBeNull();
+    expect(parseLauncherApps(".".repeat(LAUNCHER_APPS_MAX_BYTES))).toBeNull();
+  });
+});
+
+describe("the launcher's list: finishing a sign-in", () => {
+  const pending = JSON.stringify({ s: "state-1", v: "verifier-1", r: "/people" });
+  const signIn = (o: Partial<AppSessionOptions> = {}) =>
+    setup(o).handle(request("/session/callback?code=c1&state=state-1", { cookies: { [names.state]: pending } }));
+
+  it("stores what the HUB sent, in a cookie by the same rules as the token's", async () => {
+    hubState.token = () => grantWithApps(["home", "people", "marketing"]);
+    const res = (await signIn())!;
+    const c = appsCookie(res)!;
+    expect(c).toContain(`${names.apps}=.home.people.marketing`);
+    expect(c).toContain("HttpOnly");
+    expect(c).toContain("Secure");
+    expect(c).toContain("Path=/");
+    expect(c).not.toContain("Domain=");
+    expect(c).toContain(`Max-Age=${30 * 24 * 60 * 60}`); // the token cookie's life
+    expect(names.apps).toBe("__Host-cgsi.session-apps");
+  });
+
+  it("an EMPTY list from the hub is stored as one, not thrown away", async () => {
+    hubState.token = () => grantWithApps([]);
+    expect(appsCookie((await signIn())!)).toContain(`${names.apps}=.;`);
+  });
+
+  it("⛔ a hub that sends no list leaves no list: the cookie is cleared, and nothing else changes", async () => {
+    hubState.token = grantWithoutApps;
+    const res = (await signIn())!;
+    // Exactly 0.1.2's behaviour for everything else.
+    expect(res.headers.get("location")).toBe(`${APP}/people`);
+    expect(setCookie(res, names.token)).toContain("HttpOnly");
+    expect(setCookie(res, names.handle)).toContain("h-next");
+    expect(appsCookie(res)).toContain("Max-Age=0");
+  });
+
+  it("⛔ a list the hub mangled is absent, and the sign-in still succeeds", async () => {
+    for (const bad of ["home,people", ["Home"], [1, 2], { a: 1 }]) {
+      hubState.token = () => grantWithApps(bad);
+      const res = (await signIn())!;
+      expect(res.headers.get("location")).toBe(`${APP}/people`);
+      expect(setCookie(res, names.token)).toBeDefined();
+      expect(appsCookie(res)).toContain("Max-Age=0");
+    }
+  });
+});
+
+describe("the launcher's list: renewal", () => {
+  const renewing = async (cookies: Record<string, string> = {}) => ({
+    [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1", ...cookies,
+  });
+
+  it("the request that renewed sees the NEW list, not the one it arrived with", async () => {
+    hubState.token = () => grantWithApps(["home", "finance"]);
+    const cookies = await renewing({ [names.apps]: ".home", other: "x" });
+    const res = (await setup().handle(request("/", { cookies })))!;
+    // Source: the hub's answer, on this same request.
+    expect(forwarded(res)).toContain(`${names.apps}=.home.finance`);
+    expect(appsCookie(res)).toContain(`${names.apps}=.home.finance`);
+    // ⛔ And the request it arrived with is gone from what server code reads.
+    expect(forwarded(res)).not.toContain(`${names.apps}=.home;`);
+    expect(forwarded(res)).toContain("other=x");
+    // Server code, reading the forwarded jar, gets the hub's list.
+    expect(readLauncherApps(true, jarOf({ [names.apps]: ".home.finance" }))).toEqual(["home", "finance"]);
+  });
+
+  it("⛔ a value the BROWSER put in the cookie is replaced by the hub's at the renewal", async () => {
+    hubState.token = () => grantWithApps(["home"]);
+    const cookies = await renewing({ [names.apps]: ".admin.finance.leadership" });
+    const res = (await setup().handle(request("/", { cookies })))!;
+    expect(forwarded(res)).toContain(`${names.apps}=.home`);
+    expect(forwarded(res)).not.toContain("admin");
+  });
+
+  it("⛔ a hub that stopped sending a list clears the stale one, on this request too", async () => {
+    hubState.token = grantWithoutApps;
+    const res = (await setup().handle(request("/", { cookies: await renewing({ [names.apps]: ".home.finance" }) })))!;
+    expect(forwarded(res)).not.toContain(names.apps);
+    expect(appsCookie(res)).toContain("Max-Age=0");
+    // Absent, not empty: an app knows to fall back to its own source.
+    expect(readLauncherApps(true, jarOf({}))).toBeNull();
+  });
+
+  it("⛔ an internal header a browser sent is still stripped on the renewal path", async () => {
+    hubState.token = () => grantWithApps(["home"]);
+    const res = (await setup().handle(request("/", {
+      headers: { [GRACE_HEADER]: "1" }, cookies: await renewing(),
+    })))!;
+    expect(res.headers.get(`x-middleware-request-${GRACE_HEADER}`)).toBeNull();
+    expect(forwarded(res)).toContain(`${names.apps}=.home`);
+  });
+
+  it("a renewal the hub could not answer leaves the list exactly as it was", async () => {
+    const old = await mint();
+    const { handle, hub } = setup();
+    await hub.check(old);
+    hubState.token = down;
+    clock += 50 * 60 * 1000;
+    const res = (await handle(request("/", { cookies: { [names.token]: old, [names.handle]: "h1", [names.apps]: ".home" } })))!;
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+    expect(appsCookie(res)).toBeUndefined();              // untouched
+    expect(forwarded(res)).toContain(`${names.apps}=.home`);
+  });
+});
+
+describe("the launcher's list: when it is cleared", () => {
+  it("signing out clears it with the rest", async () => {
+    const res = (await setup().handle(request("/session/signout")))!;
+    for (const n of [names.token, names.handle, names.apps]) expect(setCookie(res, n)).toContain("Max-Age=0");
+  });
+
+  it("a session the hub has ended clears it, and server code never sees it", async () => {
+    const cookies = { "__Secure-authjs.session-token": "legacy", [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1", [names.apps]: ".home" };
+    const res = (await setup({ mode: "both" }).handle(request("/people", { cookies, headers: { "sec-fetch-dest": "empty" } }), { legacySignedIn: true }))!;
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+    expect(forwarded(res)).not.toContain(names.apps);
+    expect(appsCookie(res)).toContain("Max-Age=0");
+  });
+
+  it("the hub saying no access clears it too", async () => {
+    hubState.token = () => new Response("{}", { status: 403 });
+    const cookies = { [names.token]: await mint({}, { ttl: 30 }), [names.handle]: "h1", [names.apps]: ".home" };
+    const res = (await setup().handle(request("/", { cookies })))!;
+    expect(res.headers.get("location")).toBe(`${HUB}/no-access?app=console`);
+    expect(appsCookie(res)).toContain("Max-Age=0");
+  });
+});
+
+describe("the launcher's list: requests that share one renewal", () => {
+  it("every sharer of a single call gets the same list from it", async () => {
+    hubState.token = () => grantWithApps(["home", "audit"]);
+    const { hub } = setup();
+    const answers = await Promise.all([1, 2, 3, 4, 5].map(() => hub.renew("h1")));
+    expect(tokenCalls()).toBe(1);
+    for (const a of answers) {
+      expect(a).toBe(answers[0]);
+      expect(a.ok && a.launcherApps).toEqual(["home", "audit"]);
+    }
+  });
+});
+
+describe("the launcher's list: server code reading it", () => {
+  it("the cookie is the only source, and a missing or broken one is absent", () => {
+    expect(readLauncherApps(true, jarOf({ [names.apps]: ".home.people" }))).toEqual(["home", "people"]);
+    expect(readLauncherApps(true, jarOf({ [names.apps]: "." }))).toEqual([]);
+    expect(readLauncherApps(true, jarOf({}))).toBeNull();
+    expect(readLauncherApps(true, jarOf({ [names.apps]: "home.people" }))).toBeNull();
+    // Away from https the cookie loses the prefix, exactly as the token's does.
+    expect(readLauncherApps(false, jarOf({ "cgsi.session-apps": ".home" }))).toEqual(["home"]);
+    expect(readLauncherApps(false, jarOf({ [names.apps]: ".home" }))).toBeNull();
+  });
+
+  it("⛔ it is nowhere near the session: readAppSession still answers only from the token", async () => {
+    const { hub } = setup();
+    const token = await mint();
+    const session = await readAppSession(hub, true, jarOf({ [names.token]: token, [names.apps]: ".admin" }));
+    expect(session).not.toBeNull();
+    expect(session).not.toHaveProperty("launcherApps");
+    expect(session).not.toHaveProperty("apps");
+    expect(Object.keys(session!).sort()).toEqual(
+      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "role", "sid", "subject"],
+    );
   });
 });
