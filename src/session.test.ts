@@ -1007,7 +1007,7 @@ describe("capabilities: what counts as one", () => {
 
 describe("capabilities: read from the token's claims", () => {
   const claims = (over: Record<string, unknown> = {}) =>
-    ({ sid: "s1", email: "A@cgspectrum.com", gsub: "g1", lprov: "workos", kind: "staff", role: "staff", exp: 1, ...over });
+    ({ sid: "s1", email: "A@example.com", gsub: "g1", lprov: "workos", kind: "staff", role: "staff", exp: 1, ...over });
 
   it("a valid list is the session's capabilities", () => {
     // Source: the `caps` claim.
@@ -1023,7 +1023,7 @@ describe("capabilities: read from the token's claims", () => {
       // read costs the person no capabilities and nothing else.
       expect(session).not.toBeNull();
       expect(session!.capabilities).toEqual([]);
-      expect(session!.email).toBe("a@cgspectrum.com");
+      expect(session!.email).toBe("a@example.com");
       expect(session!.role).toBe("staff");
     }
   });
@@ -1035,7 +1035,7 @@ describe("capabilities: read from the token's claims", () => {
     // both: absent and empty are ONE answer here, on purpose.
     expect(before).toEqual(after);
     expect(before).toEqual({
-      sid: "s1", email: "a@cgspectrum.com", name: null, subject: "g1", loginProvider: "workos",
+      sid: "s1", email: "a@example.com", name: null, subject: "g1", loginProvider: "workos",
       kind: "staff", role: "staff", departments: [], appRole: null, capabilities: [], expiresAt: 1,
     });
   });
