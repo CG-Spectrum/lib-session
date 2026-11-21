@@ -235,7 +235,10 @@ export function createHub(o: HubOptions): Hub {
      *                        the hub answers every dead grant alike)
      *   anything else        unavailable: a timeout, a network failure, a 400,
      *                        a 404 (the hub has per-app sessions switched
-     *                        off), a 503 busy, or a body this cannot read
+     *                        off), any 503 (the hub's fail-closed
+     *                        `{ "error": "unavailable" }` when it cannot
+     *                        answer in time and in full), or a body this
+     *                        cannot read
      *
      * ⛔ NOT HELD BY THE RENEWAL PAUSE. After a hub failure, renewals answer
      * "unreachable" without calling for a second or two, which spares a hub

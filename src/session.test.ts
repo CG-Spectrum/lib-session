@@ -1192,6 +1192,25 @@ describe("the live capability check: the hub's answer, and only the hub's", () =
     }
   });
 
+  it('⛔ the hub\'s own fail-closed answer, 503 {"error":"unavailable"}, is "unavailable", and the next check still asks', async () => {
+    const said: string[] = [];
+    const { hub } = setup({ log: (m) => said.push(m) });
+    const token = await mint({ caps: ["values"] });
+    const jar = cookieJar({ [names.token]: token });
+    // Exactly what the hub sends when the access model cannot be reached, its
+    // own database throws, or the check runs past its budget.
+    hubState.capability = () => new Response(JSON.stringify({ error: "unavailable" }), {
+      status: 503, headers: { "content-type": "application/json", "retry-after": "1", "cache-control": "no-store" },
+    });
+    expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("unavailable");
+    expect(said).toEqual(["capability check unavailable: status 503"]);
+    // ⚖️ No pause and no memory: the very next check asks the hub again, and
+    // a real yes is a yes.
+    hubState.capability = () => heldAnswer(true);
+    expect(await checkCapabilityNow(hub, true, jar, undefined, "values")).toBe("held");
+    expect(capabilityCalls()).toHaveLength(2);
+  });
+
   it("⛔ no token: not_held, and the hub is never called", async () => {
     const { hub } = setup();
     hubState.capability = () => heldAnswer(true);
