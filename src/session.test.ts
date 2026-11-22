@@ -963,7 +963,10 @@ describe("the launcher's list: server code reading it", () => {
     expect(session).not.toHaveProperty("launcherApps");
     expect(session).not.toHaveProperty("apps");
     expect(Object.keys(session!).sort()).toEqual(
-      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "role", "sid", "subject"],
+      // `permissions` is a signed claim from the token (null here: this token
+      // carries none), never the launcher's unsigned list.
+      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "permissions", "role", "sid", "subject"],
     );
+    expect(session!.permissions).toBeNull();
   });
 });
