@@ -150,12 +150,17 @@ const permissions = createPermissionCheck({
 });
 const now = await permissions.check(personFromSession(session), "some.permission");
 if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
+
+// A page that needs several: ONE request, a word per key.
+const page = await permissions.checkMany(personFromSession(session), ["some.permission", "other.permission"]);
+if (page["other.permission"] === "held") showEditor(); // ⛔ "unavailable" is NO here too
 ```
 
 | | Reads | Fresh | Decides |
 |---|---|---|---|
 | `showsPermission(session, key)` | the verified token's `permissions` claim | up to 15 minutes old | ⛔ nothing: navigation and display only |
 | `check(person, key)` | `POST /permissions/check` on the hub | this moment | ✅ writes, and reads of student records or money |
+| `checkMany(person, keys)` | the same path, `permissions` in the body | this moment | ✅ the same, for up to 16 keys in one request |
 
 - `session.permissions` is `null` when the hub sent no claim (an older hub, the
   claim switched off, or a read that failed) and `[]` when it sent an empty
@@ -166,6 +171,15 @@ if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
   app may not use, a 503 the hub unable to answer, and none of those says
   anything about the person. A missing or malformed key is `unavailable`
   without calling the hub. Waits 4 seconds.
+- `checkMany` answers every key asked with the same three words, in one
+  request: one hit on the hub's rate limit and one record on the hub, however
+  many keys. ⛔ All or nothing: `held` and `not_held` only when the hub
+  answered EVERY key in that call; any failure (a status, a timeout, a missing,
+  extra or malformed key in the answer) makes EVERY key `unavailable`.
+  Duplicates are folded. More than 16 distinct keys is all `unavailable`
+  without a request; split the question. No keys answers `{}`. Needs a hub
+  that knows the several-key form; an older hub answers 400, which is all
+  `unavailable`, so adopting it early refuses rather than allows.
 - Who to ask about: `personFromSession(session)`, the login the hub signed into
   the token. A caller with no signed-in person (a Slack handler) may pass
   `{ address }`, a CGSI-issued address, only if the hub has named that app for
@@ -181,6 +195,15 @@ if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
 HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### 0.1.7: several permissions in one request
+
+- `checkMany(person, keys)` on the object `createPermissionCheck` returns, and
+  `HUB_PERMISSION_CHECK_MAX` (16). One POST to `/permissions/check` with
+  `permissions`, a word per key, all `unavailable` on any failure. Same key,
+  timeout and HTTPS rules as `check`.
+- `check` is unchanged.
+- 0.1.5 and 0.1.6 are numbers held by open drafts; this follows 0.1.4 on main.
 
 ### 0.1.4: permissions from the access model
 

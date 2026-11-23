@@ -5,7 +5,7 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { describe, expect, it } from "vitest";
 import { createHub } from "./hub";
 import {
-  HUB_PERMISSION_CHECK_TIMEOUT_MS, createPermissionCheck, personFromSession, showsPermission,
+  HUB_PERMISSION_CHECK_MAX, HUB_PERMISSION_CHECK_TIMEOUT_MS, createPermissionCheck, personFromSession, showsPermission,
 } from "./permissions";
 import type { AppSession } from "./core";
 
@@ -167,5 +167,133 @@ describe("the check: what to OPEN or WRITE", () => {
     await pc().check({ login: { provider: "workos", subject: "user_01ABC" } }, "app.home.open");
     const all = logs.join(" ");
     for (const v of [KEY, "user_01ABC", "app.home.open"]) expect(all).not.toContain(v);
+  });
+});
+
+describe("checkMany: several decisions, ONE request", () => {
+  const who = { login: { provider: "workos", subject: "user_01ABC" } };
+  const addr = { address: "someone@example.test" };
+  const keys = ["app.home.open", "student.read", "caseload.read"] as const;
+  const answered = { held: { "app.home.open": true, "student.read": false, "caseload.read": true } };
+
+  it("one POST to the same path with the list and the person, and a word per key", async () => {
+    const { calls, pc } = standIn(() => json(200, answered));
+    expect(await pc().checkMany(who, keys)).toEqual({
+      "app.home.open": "held", "student.read": "not_held", "caseload.read": "held",
+    });
+    expect(calls).toHaveLength(1);
+    const [c] = calls;
+    expect(c!.url).toBe(`${HUB}/permissions/check`);
+    expect(c!.init.method).toBe("POST");
+    expect(c!.init.cache).toBe("no-store");
+    expect(c!.init.signal).toBeInstanceOf(AbortSignal);
+    expect((c!.init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY}`);
+    expect(c!.body).toEqual({ permissions: [...keys], login: { provider: "workos", subject: "user_01ABC" } });
+  });
+  it("the address form sends exactly the list and the address", async () => {
+    const { calls, pc } = standIn(() => json(200, { held: { "app.home.open": false } }));
+    expect(await pc().checkMany(addr, ["app.home.open"])).toEqual({ "app.home.open": "not_held" });
+    expect(calls[0]!.body).toEqual({ permissions: ["app.home.open"], address: "someone@example.test" });
+  });
+  it("duplicates are folded before sending, and each key is answered once", async () => {
+    const { calls, pc } = standIn(() => json(200, { held: { "student.read": true, "app.home.open": false } }));
+    expect(await pc().checkMany(who, ["student.read", "app.home.open", "student.read"])).toEqual({
+      "student.read": "held", "app.home.open": "not_held",
+    });
+    expect(calls[0]!.body.permissions).toEqual(["student.read", "app.home.open"]);
+  });
+  it(`up to ${HUB_PERMISSION_CHECK_MAX} distinct keys are asked; more is ALL unavailable without a request`, async () => {
+    expect(HUB_PERMISSION_CHECK_MAX).toBe(16);
+    const most = Array.from({ length: HUB_PERMISSION_CHECK_MAX }, (_, i) => `app.k${i}.open`);
+    const ok = standIn((c) => json(200, { held: Object.fromEntries((c.body.permissions as string[]).map((k) => [k, true])) }));
+    expect(Object.values(await ok.pc().checkMany(who, [...most, most[0]!]))).toEqual(Array(16).fill("held"));
+    const over = standIn(() => json(200, {}));
+    const r = await over.pc().checkMany(who, [...most, "app.extra.open"]);
+    expect(Object.keys(r)).toHaveLength(17);
+    expect(new Set(Object.values(r))).toEqual(new Set(["unavailable"]));
+    expect(over.calls).toEqual([]);
+    expect(over.logs).toEqual(["permission checkMany unavailable: too many"]);
+  });
+  it("no keys asks nothing and answers nothing", async () => {
+    const { calls, pc } = standIn(() => json(200, answered));
+    expect(await pc().checkMany(who, [])).toEqual({});
+    expect(calls).toEqual([]);
+  });
+  it("⛔ every status but 200 is EVERY key unavailable: including 400, 401, 403, 404, 429 and 503", async () => {
+    // (No 204 here: a 204 cannot carry the body this stand-in sends.)
+    for (const status of [201, 400, 401, 403, 404, 415, 429, 500, 503]) {
+      const { pc, logs } = standIn(() => json(status, answered));
+      expect(await pc().checkMany(who, keys), String(status)).toEqual({
+        "app.home.open": "unavailable", "student.read": "unavailable", "caseload.read": "unavailable",
+      });
+      expect(logs).toEqual([`permission checkMany unavailable: status ${status}`]);
+    }
+  });
+  it("⛔ a PARTIAL or malformed 200 is EVERY key unavailable, never the keys that happened to be there", async () => {
+    for (const body of [
+      { held: { "app.home.open": true, "student.read": false } }, // one missing
+      { held: { ...answered.held, "other.key": true } }, // one extra
+      { held: { ...answered.held, "student.read": "false" } },
+      { held: { ...answered.held, "app.home.open": 1 } },
+      { held: { ...answered.held, "caseload.read": null } },
+      { held: true }, { held: [true, false, true] }, {}, null, "held", [answered],
+    ]) {
+      const { pc } = standIn(() => json(200, body));
+      const r = await pc().checkMany(who, keys);
+      expect(new Set(Object.values(r)), JSON.stringify(body)).toEqual(new Set(["unavailable"]));
+      expect(Object.keys(r)).toEqual([...keys]);
+    }
+    const { pc } = standIn(() => new Response("not json", { status: 200 }));
+    expect(new Set(Object.values(await pc().checkMany(who, keys)))).toEqual(new Set(["unavailable"]));
+  });
+  it("an inherited key is not an answer", async () => {
+    const { pc } = standIn(() => json(200, { held: { "app.home.open": true } }));
+    // `toString` lives on every object's prototype; asking for it must not read it.
+    const r = await pc().checkMany(who, ["app.home.open", "toString"]);
+    expect(r).toEqual({ "app.home.open": "unavailable", toString: "unavailable" });
+  });
+  it("a network failure and a timeout are every key unavailable, by NAME, and nothing throws", async () => {
+    const net = standIn(() => { throw new TypeError("fetch failed: secret detail"); });
+    expect(new Set(Object.values(await net.pc().checkMany(who, keys)))).toEqual(new Set(["unavailable"]));
+    expect(net.logs).toEqual(["permission checkMany unavailable: network"]);
+    const slow = standIn(() => { throw Object.assign(new Error("x"), { name: "TimeoutError" }); });
+    expect(new Set(Object.values(await slow.pc().checkMany(who, keys)))).toEqual(new Set(["unavailable"]));
+    expect(slow.logs).toEqual(["permission checkMany unavailable: timeout"]);
+  });
+  it("no key, or a hub that is not https: every key unavailable, and nothing is sent", async () => {
+    const noKey = standIn(() => json(200, answered));
+    expect(new Set(Object.values(await noKey.pc(undefined).checkMany(who, keys)))).toEqual(new Set(["unavailable"]));
+    expect(noKey.calls).toEqual([]);
+    expect(noKey.logs).toEqual(["permission checkMany unavailable: no key"]);
+    const calls: unknown[] = [];
+    const logs: string[] = [];
+    const plain = createPermissionCheck({
+      hubUrl: "http://hub.example.test", serviceKey: KEY, log: (m) => logs.push(m),
+      fetch: (async () => { calls.push(1); return json(200, answered); }) as typeof fetch,
+    });
+    expect(new Set(Object.values(await plain.checkMany(who, keys)))).toEqual(new Set(["unavailable"]));
+    expect(calls).toEqual([]);
+    expect(logs).toEqual(["permission checkMany unavailable: hub address is not https"]);
+  });
+  it("never caches: two calls are two requests", async () => {
+    let held = true;
+    const { calls, pc } = standIn(() => json(200, { held: { "app.home.open": held } }));
+    const check = pc();
+    expect(await check.checkMany(who, ["app.home.open"])).toEqual({ "app.home.open": "held" });
+    held = false;
+    expect(await check.checkMany(who, ["app.home.open"])).toEqual({ "app.home.open": "not_held" });
+    expect(calls).toHaveLength(2);
+  });
+  it("check is unchanged beside it: the single body, the single answer", async () => {
+    const { calls, pc } = standIn(() => json(200, { held: true }));
+    expect(await pc().check(who, "app.home.open")).toBe("held");
+    expect(calls[0]!.body).toEqual({ permission: "app.home.open", login: { provider: "workos", subject: "user_01ABC" } });
+  });
+  it("⛔ no log line carries the key, the person or a permission", async () => {
+    const { pc, logs } = standIn(() => json(503, { error: "unavailable" }));
+    await pc().checkMany(who, keys);
+    await pc().checkMany(addr, keys);
+    const all = logs.join(" ");
+    for (const v of [KEY, "user_01ABC", "someone@example.test", ...keys]) expect(all).not.toContain(v);
   });
 });
