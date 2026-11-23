@@ -182,16 +182,14 @@ HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
 
-### Unreleased: permissions from the access model
+### 0.1.4: permissions from the access model
 
 - `AppSession.permissions` (the token's signed claim, or `null`) and
   `showsPermission`, for display only.
 - `createPermissionCheck` and `personFromSession`: the live check, server to
   server, with the app's own key. Fails closed.
 - Nothing else changed. Against a hub that sends no claim, sessions read
-  exactly as before, with `permissions: null`.
-- The version number is settled when this merges, beside the capability
-  changes.
+  exactly as in 0.1.3, with `permissions: null`.
 
 ### 0.1.3
 
