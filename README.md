@@ -133,6 +133,47 @@ clears the cookie rather than leaving the last one behind, and it is cleared
 wherever the other cookies are: sign-out, a session the hub has ended, and any
 refusal.
 
+## Permissions from the access model
+
+Two helpers, for two different jobs. ⛔ Never swap them.
+
+```ts
+import { createPermissionCheck, personFromSession, showsPermission } from "@cgsi/session";
+
+// What to SHOW: the token's signed `permissions` claim. Up to 15 minutes old.
+if (showsPermission(session, "app.people.open")) drawTile();
+
+// What to OPEN or WRITE: the hub, now, server to server, with THIS app's key.
+const permissions = createPermissionCheck({
+  hubUrl: process.env.AUTH_HOST_URL!,
+  serviceKey: process.env.HUB_PERMISSION_CHECK_KEY, // this app's own key, server only
+});
+const now = await permissions.check(personFromSession(session), "some.permission");
+if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
+```
+
+| | Reads | Fresh | Decides |
+|---|---|---|---|
+| `showsPermission(session, key)` | the verified token's `permissions` claim | up to 15 minutes old | ⛔ nothing: navigation and display only |
+| `check(person, key)` | `POST /permissions/check` on the hub | this moment | ✅ writes, and reads of student records or money |
+
+- `session.permissions` is `null` when the hub sent no claim (an older hub, the
+  claim switched off, or a read that failed) and `[]` when it sent an empty
+  one. Both show nothing.
+- `check` answers `held`, `not_held` or `unavailable`, never a boolean, never
+  throws and never caches. ⛔ Anything but `held` is no. Every status but a
+  200 is `unavailable`: a 401 means this app's key is wrong, a 403 a form this
+  app may not use, a 503 the hub unable to answer, and none of those says
+  anything about the person. A missing or malformed key is `unavailable`
+  without calling the hub. Waits 4 seconds.
+- Who to ask about: `personFromSession(session)`, the login the hub signed into
+  the token. A caller with no signed-in person (a Slack handler) may pass
+  `{ address }`, a CGSI-issued address, only if the hub has named that app for
+  it.
+- 🔴 A yes for a permission held on a caseload or on disciplines means "for
+  some records". Necessary, not sufficient: the app still applies the scope.
+- The package reads no environment variable. The app passes its key in.
+
 ## Cookies
 
 `__Host-cgsi.session`, `__Host-cgsi.session-handle`,
@@ -140,6 +181,17 @@ refusal.
 HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### Unreleased: permissions from the access model
+
+- `AppSession.permissions` (the token's signed claim, or `null`) and
+  `showsPermission`, for display only.
+- `createPermissionCheck` and `personFromSession`: the live check, server to
+  server, with the app's own key. Fails closed.
+- Nothing else changed. Against a hub that sends no claim, sessions read
+  exactly as before, with `permissions: null`.
+- The version number is settled when this merges, beside the capability
+  changes.
 
 ### 0.1.3
 

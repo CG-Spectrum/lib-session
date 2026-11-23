@@ -218,6 +218,12 @@ export interface AppSession {
   departments: string[];
   /** This app's own role for the person, or null. */
   appRole: string | null;
+  /**
+   * The access model's display permissions, from the token's `permissions`
+   * claim, or null when the hub sent none (an older hub, the claim switched
+   * off, or a read that failed). ⛔ Display only: see `showsPermission`.
+   */
+  permissions: string[] | null;
   /** When the token runs out (seconds since 1970). */
   expiresAt: number;
 }
@@ -232,6 +238,7 @@ export function sessionFromClaims(p: Record<string, unknown>): AppSession | null
     subject: p.gsub, loginProvider: p.lprov, kind: p.kind, role: p.role,
     departments: Array.isArray(p.departments) ? p.departments.filter(str) : [],
     appRole: str(p.appRole) ? p.appRole : null,
+    permissions: Array.isArray(p.permissions) ? p.permissions.filter(str) : null,
     expiresAt: p.exp,
   };
 }
