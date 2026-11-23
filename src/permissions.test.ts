@@ -131,6 +131,28 @@ describe("the check: what to OPEN or WRITE", () => {
       expect(logs).toEqual(["permission check unavailable: no key"]);
     }
   });
+  it("a hub address that is not https: unavailable, and the key is never sent", async () => {
+    for (const hubUrl of ["http://auth.cgspectrum.com", "auth.cgspectrum.com", "ftp://auth.cgspectrum.com", "http://localhost.evil.com"]) {
+      const calls: unknown[] = [];
+      const logs: string[] = [];
+      const pc = createPermissionCheck({
+        hubUrl, serviceKey: KEY, log: (m) => logs.push(m),
+        fetch: (async () => { calls.push(1); return json(200, { held: true }); }) as typeof fetch,
+      });
+      expect(await pc.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+      expect(calls).toEqual([]);
+      expect(logs).toEqual(["permission check unavailable: hub address is not https"]);
+    }
+  });
+  it("plain http to this machine is allowed, for local development", async () => {
+    for (const hubUrl of ["http://localhost:3000", "http://127.0.0.1:3000/", "http://[::1]:3000"]) {
+      const pc = createPermissionCheck({
+        hubUrl, serviceKey: KEY, log: () => {},
+        fetch: (async () => json(200, { held: true })) as typeof fetch,
+      });
+      expect(await pc.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("held");
+    }
+  });
   it("never caches: two checks are two calls, and a changed answer is seen at once", async () => {
     let held = true;
     const { calls, pc } = standIn(() => json(200, { held }));

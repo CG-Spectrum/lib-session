@@ -89,6 +89,8 @@ export interface PermissionCheck {
 }
 
 const KEY = /^[\x21-\x7e]{16,512}$/;
+/** The key travels in a header, so the hub must be HTTPS. Plain HTTP only to this machine, for local development. */
+const SAFE_HUB = /^(https:\/\/[^\s/]+|http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)(\/|$)/;
 
 export function createPermissionCheck(o: PermissionCheckOptions): PermissionCheck {
   const base = o.hubUrl.replace(/\/$/, "");
@@ -100,6 +102,12 @@ export function createPermissionCheck(o: PermissionCheckOptions): PermissionChec
       // without the hub, rather than sending a request that cannot succeed.
       if (typeof o.serviceKey !== "string" || !KEY.test(o.serviceKey)) {
         log("permission check unavailable: no key");
+        return "unavailable";
+      }
+      // ⛔ No key over plain HTTP: a misconfigured hub address would send this
+      // app's key in clear. Refused here, without a request.
+      if (!SAFE_HUB.test(base)) {
+        log("permission check unavailable: hub address is not https");
         return "unavailable";
       }
       const body = "login" in person
