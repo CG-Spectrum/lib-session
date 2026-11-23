@@ -1,6 +1,6 @@
 {
   "name": "@cgsi/session",
-  "version": "0.1.4",
+  "version": "0.1.7",
   "private": false,
   "type": "module",
   "description": "Per-app sessions for CGSI apps: a hub-signed token in a host-only cookie.",
