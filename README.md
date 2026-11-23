@@ -149,6 +149,75 @@ They have different names, different sources and different functions, and one
 is a field of `AppSession` while the other can never be. If the question is
 "may this person do X", the answer is `hasCapability`.
 
+## Asking at the moment of the decision
+
+The signed claim above is re-read whenever the token is renewed, so it is up to
+15 minutes old. That is the right answer for deciding what to **show** and the
+wrong one for deciding what to **open**. For a key over money or personal
+records, ask the hub at the moment the app decides:
+
+```ts
+import { hasCapability } from "@cgsi/session";
+import { checkCapabilityNow, readAppSession } from "@cgsi/session/server";
+
+const session = await readAppSession(hub, secure, await cookies(), await headers());
+const show = hasCapability(session, "values");        // the tab, the menu item
+
+// ...and when the person actually opens it, or writes:
+const now = await checkCapabilityNow(hub, secure, await cookies(), await headers(), "values");
+if (now !== "held") return tryAgain();                // ⛔ "unavailable" is NO
+```
+
+**⛔ It answers a word, never a boolean.** An app handed `true | false` has
+nowhere to put "the hub could not be asked", and what it will do with that
+nowhere is treat it as one of the two.
+
+| Answer | Means | For a sensitive key |
+|---|---|---|
+| `"held"` | the hub said yes, in this call, just now | the only yes |
+| `"not_held"` | the hub said no, or there is nothing to ask with | no |
+| `"unavailable"` | the hub could not be asked, or did not answer usefully | **no** |
+
+**Which to use when:**
+
+| | `hasCapability(session, key)` | `checkCapabilityNow(...)` |
+|---|---|---|
+| Source | the signed token | the hub, in this call |
+| Age | up to 15 minutes | now |
+| Cost | none | one request, up to 4 seconds |
+| Decides | what to **show** | what to **open** or **write** |
+| When the hub is unreachable | the claim still answers | `"unavailable"`, which is no |
+
+A key over money or personal records needs **both**: the claim to draw the tab,
+the live check to serve the page or take the write. Showing a tab that then
+refuses is a cosmetic cost; opening a record on a grant withdrawn fourteen
+minutes ago is not.
+
+What it does, exactly:
+
+- Presents the token **this request** holds. A renewal on this same request
+  hands server code the new token, and this reads it from that same place, so
+  a just-renewed session never presents the token the hub has moved on from.
+- No token, an expired one, or one this app would not itself accept is
+  `"not_held"` **without calling the hub**.
+- ⛔ **The grace period does not apply.** An expired token is honoured for up
+  to an hour when the hub cannot be reached (see **The grace period**); a
+  request on that path is `"not_held"` here, and the hub is not asked.
+- A timeout, a network failure, a `4xx`, a `5xx`, or a body it cannot read are
+  all `"unavailable"`. Only a `200` saying `true`, in this call, is `"held"`.
+- ⛔ It never throws, and it never logs a value: a reason word only.
+- The short pause renewals take after a hub failure does **not** apply to it,
+  and it does not lengthen that pause. A sensitive decision is rare beside a
+  renewal, so it adds no flood; and nothing but a real `200` is ever `"held"`,
+  so the pause is not what makes it safe.
+- Its own deadline, `HUB_CAPABILITY_TIMEOUT_MS`, 4 seconds: half the `/token`
+  wait, because the hub bounds its own work on this call far more tightly, and
+  because waiting longer only makes the person wait longer for the same no.
+
+The hub side is `POST /capability` on the sign-in hub, which answers from a
+fresh read of the person's grants by the same rule it signs the claim with. It
+needs no new secret: the app presents the token the hub signed for it.
+
 ## The launcher's list of apps
 
 The hub sends the person's app keys beside the token at every grant and
@@ -230,6 +299,22 @@ if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
 HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### 0.1.6
+
+- `checkCapabilityNow(hub, secure, cookies, headers, key)`: asks the hub
+  whether this person holds this key RIGHT NOW, and answers `"held"`,
+  `"not_held"` or `"unavailable"`. ⛔ Never a boolean, and for a sensitive key
+  anything but `"held"` is no. See **Asking at the moment of the decision**.
+- It presents the token this request holds, so a session renewed on the same
+  request is checked on its new token.
+- ⛔ Fails closed: no grace, no benefit of the doubt. The hub-down grace that
+  carries an expired token for up to an hour does not apply, and no failure of
+  any kind can produce `"held"`.
+- `hub.checkCapability(token, key)` beside it, for an app that has already
+  found the token itself. `HubOptions.log` is where its reason word goes.
+- Nothing else changed. An app that calls neither behaves exactly as 0.1.5,
+  and no hub call is made that was not made before.
 
 ### 0.1.5
 

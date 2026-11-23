@@ -37,6 +37,19 @@ export function originGuardMode(raw: string | undefined, mode: SessionMode): Ori
 // longer costs little: a hub that is really down is remembered as busy after
 // the first failure, so the wait is paid once and not by every request.
 export const HUB_TOKEN_TIMEOUT_MS = 8000;
+// How long to wait for the hub's answer on a live capability check.
+//
+// ⚖️ HALF THE /token WAIT, ON PURPOSE. This call sits in front of a page load
+// or a write, with a person waiting, and the hub bounds its own work on it far
+// more tightly than a renewal: the hub stops and answers "busy" once the
+// request has run past its own deadline, and the one slow thing inside it (the
+// access-model check) is raced against what is left of that. So the hub's
+// worst case is its deadline plus a cold start, and 4 seconds covers that with
+// the wire in both directions.
+//
+// ⛔ A TIMEOUT HERE IS A REFUSAL, NOT A GRACE. Waiting longer would only make
+// the person wait longer for the same no.
+export const HUB_CAPABILITY_TIMEOUT_MS = 4000;
 // Renew this long before a token runs out, so a page never starts with one
 // about to expire.
 export const RENEW_EARLY_SECONDS = 60;
@@ -319,7 +332,29 @@ export function sessionFromClaims(p: Record<string, unknown>): AppSession | null
  * ✅ The answer comes from the verified token and nowhere else. Nobody is
  * signed in (a null session) is false, so a gate written this way fails closed
  * without the caller remembering to check.
+ *
+ * ⚖️ IT IS UP TO 15 MINUTES OLD, which is the right answer for deciding what
+ * to SHOW and the wrong one for deciding what to OPEN. For a key over money or
+ * personal records, show from this and open from `checkCapabilityNow`
+ * (`@cgsi/session/server`), which asks the hub at that moment.
  */
 export function hasCapability(session: AppSession | null | undefined, key: string): boolean {
   return !!session && session.capabilities.includes(key);
 }
+
+// ── Asking the hub at the moment of the decision ────────────────────────────
+// ⛔ THREE WORDS, AND NEVER A BOOLEAN. An app that gets `true | false` has
+// nowhere to put "the hub could not be asked", and the thing it will do with
+// that nowhere is treat it as one of the two, usually the wrong one. So the
+// answer is a word the caller has to read:
+//
+//   held         the hub said yes, in this call, just now
+//   not_held     the hub said no, or there is nothing to ask with
+//   unavailable  the hub could not be asked, or did not answer usefully
+//
+// ⚖️ FOR A SENSITIVE KEY, ANYTHING BUT "held" IS NO. There is no grace and no
+// benefit of the doubt: the whole reason for asking is that the signed claim
+// might be out of date, so an unanswered question cannot be resolved in the
+// person's favour. An app that cannot bear a refusal on a hub blip should keep
+// the decision on the claim and say so, rather than soften this.
+export type CapabilityNow = "held" | "not_held" | "unavailable";
