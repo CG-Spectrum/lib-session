@@ -44,8 +44,10 @@ if (r) return r;
 
 ```ts
 // server code
+import { hasCapability } from "@cgsi/session";
 import { readAppSession, readLauncherApps } from "@cgsi/session/server";
 const session = await readAppSession(hub, secure, await cookies(), await headers());
+const mayExport = hasCapability(session, "exports");          // signed: may decide
 const launcherApps = readLauncherApps(secure, await cookies()); // tiles only, see below
 ```
 
@@ -99,6 +101,53 @@ path, unasked. The first call made after that pause gets the real answer and
 ends the session at once. This is the existing grace design, which already
 carries a person for up to an hour on a hub that cannot answer; the pause adds
 seconds to a window measured in minutes.
+
+## This app's own capabilities
+
+Some apps decide a second thing from a second grant: a page only some people
+may open, an editor only some people may use. The hub signs those keys into
+the token as `caps`, and this package reads them into `session.capabilities`.
+
+```ts
+if (!hasCapability(session, "exports")) return notFound();
+```
+
+**✅ Signed, so it may decide.** It comes from the token the hub signed for
+this app and nothing else. A null session is `false`, so a gate written this
+way fails closed without the caller remembering to check.
+
+What the hub will and will not put in it:
+
+- Only keys **this app** declared in the hub's registry, and only those the
+  person actually holds. An app is never told about another app's key, however
+  many the person holds, so a capability says what this person may do here and
+  nothing at all about anywhere else.
+- An empty list and no list are **the same answer**: no capabilities. A
+  capability has no older source to fall back to, so either the signed token
+  says the person has it or they do not. There is deliberately no `null` here
+  to tell apart (the launcher's list below is the opposite case, and keeps its
+  distinction for exactly that reason).
+- An older hub sends no claim at all, which is the same empty answer, and
+  everything else behaves exactly as 0.1.3.
+- Anything unreadable in the claim is no capabilities. It never throws and it
+  never costs the person the session: a list of at most 24 app keys
+  (`^[a-z][a-z0-9-]{1,40}$`) or nothing.
+
+### ⛔ Not the launcher's list
+
+The two are easy to say in one breath and must never be used in one:
+
+| | `session.capabilities` | `readLauncherApps(...)` |
+|---|---|---|
+| Comes from | the verified token | a cookie |
+| Signed | ✅ yes, by the hub, for this app | ⛔ no |
+| May decide | ✅ yes | ⛔ never |
+| About | what this person may do **here** | which tiles to draw |
+| Absent | the same as empty | `null`, which is not `[]` |
+
+They have different names, different sources and different functions, and one
+is a field of `AppSession` while the other can never be. If the question is
+"may this person do X", the answer is `hasCapability`.
 
 ## The launcher's list of apps
 
@@ -181,6 +230,18 @@ if (now !== "held") return refuse(); // ⛔ "unavailable" is NO
 HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### 0.1.5
+
+- `session.capabilities`: this app's own sub-grant keys, from the **verified**
+  token's `caps` claim, with `hasCapability(session, key)` beside it. ✅ This
+  is the one that may decide something. See **This app's own capabilities**.
+- Absent, unreadable, or anything in it that is not an app key, all mean no
+  capabilities. Never an error, never a refused session.
+- Against a hub that does not send the claim, 0.1.5 behaves exactly as 0.1.4
+  did, with `capabilities` empty on every session.
+- ⛔ The launcher's list is unchanged and still decides nothing. The two are
+  set out side by side above so they cannot be mistaken for one another.
 
 ### 0.1.4: permissions from the access model
 
