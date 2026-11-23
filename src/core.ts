@@ -278,6 +278,7 @@ export interface AppSession {
    * off, or a read that failed). ⛔ Display only: see `showsPermission`.
    */
   permissions: string[] | null;
+  /**
    * ✅ THE SIGNED ONE. This app's own sub-grant keys that the person holds,
    * from the verified token, so it MAY be decided from. Empty when the hub
    * sent none, which includes every hub older than this claim.

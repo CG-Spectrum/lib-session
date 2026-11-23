@@ -128,7 +128,7 @@ What the hub will and will not put in it:
   to tell apart (the launcher's list below is the opposite case, and keeps its
   distinction for exactly that reason).
 - An older hub sends no claim at all, which is the same empty answer, and
-  everything else behaves exactly as 0.1.3.
+  everything else behaves exactly as 0.1.4.
 - Anything unreadable in the claim is no capabilities. It never throws and it
   never costs the person the session: a list of at most 24 app keys
   (`^[a-z][a-z0-9-]{1,40}$`) or nothing.

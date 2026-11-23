@@ -1031,15 +1031,16 @@ describe("capabilities: read from the token's claims", () => {
     }
   });
 
-  it("a token with no claim at all behaves exactly as 0.1.3 did", () => {
+  it("a token with no claim at all behaves exactly as 0.1.4 did", () => {
     const before = sessionFromClaims(claims());
     const after = sessionFromClaims(claims({ caps: [] }));
-    // Every field 0.1.3 had, with the same values, and the new one empty in
+    // Every field 0.1.4 had, with the same values, and the new one empty in
     // both: absent and empty are ONE answer here, on purpose.
     expect(before).toEqual(after);
     expect(before).toEqual({
       sid: "s1", email: "a@example.com", name: null, subject: "g1", loginProvider: "workos",
-      kind: "staff", role: "staff", departments: [], appRole: null, capabilities: [], expiresAt: 1,
+      kind: "staff", role: "staff", departments: [], appRole: null, capabilities: [], permissions: null,
+      expiresAt: 1,
     });
   });
 });
