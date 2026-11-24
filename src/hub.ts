@@ -5,7 +5,7 @@ import { HUB_TOKEN_TIMEOUT_MS, launcherAppsFrom, sessionFromClaims, type AppSess
 export interface HubOptions {
   /** This app's key in the hub's registry, e.g. "console". */
   app: string;
-  /** The hub, e.g. https://auth.cgspectrum.com. */
+  /** The hub, e.g. https://hub.example.test. */
   hubUrl: string;
   /** Who signs. Defaults to hubUrl. Staging has its own. */
   issuer?: string;

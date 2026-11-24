@@ -9,7 +9,7 @@ import {
 } from "./permissions";
 import type { AppSession } from "./core";
 
-const HUB = "https://auth.cgspectrum.com";
+const HUB = "https://hub.example.test";
 const KEY = "k".repeat(43);
 const key = await generateKeyPair("ES256", { extractable: true });
 const jwks = { keys: [{ ...(await exportJWK(key.publicKey)), kid: "k1", alg: "ES256", use: "sig" }] };
@@ -17,7 +17,7 @@ const jwks = { keys: [{ ...(await exportJWK(key.publicKey)), kid: "k1", alg: "ES
 async function verified(claims: Record<string, unknown>): Promise<AppSession> {
   const now = Math.floor(Date.now() / 1000);
   const token = await new SignJWT({
-    sid: "s1", email: "a@cgspectrum.com", name: "A", gsub: "user_01ABC", lprov: "workos", kind: "staff",
+    sid: "s1", email: "a@example.test", name: "A", gsub: "user_01ABC", lprov: "workos", kind: "staff",
     role: "staff", departments: [], appRole: null, ...claims,
   }).setProtectedHeader({ alg: "ES256", kid: "k1" }).setIssuer(HUB).setAudience("console")
     .setIssuedAt(now).setExpirationTime(now + 900).sign(key.privateKey);
@@ -85,8 +85,8 @@ describe("the check: what to OPEN or WRITE", () => {
   });
   it("sends the address form as exactly the address and the permission", async () => {
     const { calls, pc } = standIn(() => json(200, { held: false }));
-    expect(await pc().check({ address: "someone@cgspectrum.com" }, "app.home.open")).toBe("not_held");
-    expect(calls[0]!.body).toEqual({ permission: "app.home.open", address: "someone@cgspectrum.com" });
+    expect(await pc().check({ address: "someone@example.test" }, "app.home.open")).toBe("not_held");
+    expect(calls[0]!.body).toEqual({ permission: "app.home.open", address: "someone@example.test" });
   });
   it("a person reference carries nothing it was not built with", async () => {
     const { calls, pc } = standIn(() => json(200, { held: false }));
@@ -98,48 +98,48 @@ describe("the check: what to OPEN or WRITE", () => {
   it("⛔ every other status is unavailable, which is NO: including 401, 403, 404 and 503", async () => {
     for (const status of [201, 204, 400, 401, 403, 404, 415, 429, 500, 503]) {
       const { pc } = standIn(() => json(status, { held: true }));
-      expect(await pc().check({ address: "a@cgspectrum.com" }, "app.home.open"), String(status)).toBe("unavailable");
+      expect(await pc().check({ address: "a@example.test" }, "app.home.open"), String(status)).toBe("unavailable");
     }
   });
   it("⛔ a 200 that is not an answer is unavailable", async () => {
     for (const body of [{}, { held: "true" }, { held: 1 }, null, "held"]) {
       const { pc } = standIn(() => json(200, body));
-      expect(await pc().check({ address: "a@cgspectrum.com" }, "app.home.open"), JSON.stringify(body)).toBe("unavailable");
+      expect(await pc().check({ address: "a@example.test" }, "app.home.open"), JSON.stringify(body)).toBe("unavailable");
     }
     const { pc } = standIn(() => new Response("not json", { status: 200 }));
-    expect(await pc().check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+    expect(await pc().check({ address: "a@example.test" }, "app.home.open")).toBe("unavailable");
   });
   it("a network failure and a timeout are unavailable, by NAME, and nothing throws", async () => {
     const net = standIn(() => { throw new TypeError("fetch failed: secret detail"); });
-    expect(await net.pc().check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+    expect(await net.pc().check({ address: "a@example.test" }, "app.home.open")).toBe("unavailable");
     expect(net.logs).toEqual(["permission check unavailable: network"]);
     const slow = standIn(() => { throw Object.assign(new Error("x"), { name: "TimeoutError" }); });
-    expect(await slow.pc().check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+    expect(await slow.pc().check({ address: "a@example.test" }, "app.home.open")).toBe("unavailable");
     expect(slow.logs).toEqual(["permission check unavailable: timeout"]);
   });
   it("asks with a timeout, and the timeout is the capability check's", async () => {
     const { calls, pc } = standIn(() => json(200, { held: true }));
-    await pc().check({ address: "a@cgspectrum.com" }, "app.home.open");
+    await pc().check({ address: "a@example.test" }, "app.home.open");
     expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
     expect(HUB_PERMISSION_CHECK_TIMEOUT_MS).toBe(4000);
   });
   it("no key, or a malformed one: unavailable, and the hub is never called", async () => {
     for (const k of [undefined, "", "short", "has a space in it, long enough"]) {
       const { calls, pc, logs } = standIn(() => json(200, { held: true }));
-      expect(await pc(k).check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+      expect(await pc(k).check({ address: "a@example.test" }, "app.home.open")).toBe("unavailable");
       expect(calls).toEqual([]);
       expect(logs).toEqual(["permission check unavailable: no key"]);
     }
   });
   it("a hub address that is not https: unavailable, and the key is never sent", async () => {
-    for (const hubUrl of ["http://auth.cgspectrum.com", "auth.cgspectrum.com", "ftp://auth.cgspectrum.com", "http://localhost.evil.com"]) {
+    for (const hubUrl of ["http://hub.example.test", "hub.example.test", "ftp://hub.example.test", "http://localhost.evil.com"]) {
       const calls: unknown[] = [];
       const logs: string[] = [];
       const pc = createPermissionCheck({
         hubUrl, serviceKey: KEY, log: (m) => logs.push(m),
         fetch: (async () => { calls.push(1); return json(200, { held: true }); }) as typeof fetch,
       });
-      expect(await pc.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("unavailable");
+      expect(await pc.check({ address: "a@example.test" }, "app.home.open")).toBe("unavailable");
       expect(calls).toEqual([]);
       expect(logs).toEqual(["permission check unavailable: hub address is not https"]);
     }
@@ -150,16 +150,16 @@ describe("the check: what to OPEN or WRITE", () => {
         hubUrl, serviceKey: KEY, log: () => {},
         fetch: (async () => json(200, { held: true })) as typeof fetch,
       });
-      expect(await pc.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("held");
+      expect(await pc.check({ address: "a@example.test" }, "app.home.open")).toBe("held");
     }
   });
   it("never caches: two checks are two calls, and a changed answer is seen at once", async () => {
     let held = true;
     const { calls, pc } = standIn(() => json(200, { held }));
     const check = pc();
-    expect(await check.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("held");
+    expect(await check.check({ address: "a@example.test" }, "app.home.open")).toBe("held");
     held = false;
-    expect(await check.check({ address: "a@cgspectrum.com" }, "app.home.open")).toBe("not_held");
+    expect(await check.check({ address: "a@example.test" }, "app.home.open")).toBe("not_held");
     expect(calls).toHaveLength(2);
   });
   it("⛔ no log line carries the key, the person or the permission", async () => {
