@@ -9,8 +9,8 @@ import { createHub } from "./hub";
 import { createSessionMiddleware, type AppSessionOptions } from "./middleware";
 import { readAppSession, readLauncherApps } from "./server";
 
-const HUB = "https://auth.cgspectrum.com";
-const APP = "https://console.cgspectrum.com";
+const HUB = "https://hub.example.test";
+const APP = "https://app.example.test";
 const names = cookieNames(true);
 const key = await generateKeyPair("ES256", { extractable: true });
 const other = await generateKeyPair("ES256", { extractable: true });
@@ -20,7 +20,7 @@ let clock = Date.parse("2026-11-19T00:00:00Z");
 const secs = () => Math.floor(clock / 1000);
 
 async function mint(over: Record<string, unknown> = {}, opts: { aud?: string; iss?: string; ttl?: number; signer?: CryptoKey } = {}) {
-  return new SignJWT({ sid: "s1", email: "A@cgspectrum.com", name: "A", gsub: "g1", lprov: "workos", kind: "staff", role: "staff", departments: [], appRole: null, ...over })
+  return new SignJWT({ sid: "s1", email: "A@example.test", name: "A", gsub: "g1", lprov: "workos", kind: "staff", role: "staff", departments: [], appRole: null, ...over })
     .setProtectedHeader({ alg: "ES256", kid: "k1" })
     .setIssuer(opts.iss ?? HUB).setAudience(opts.aud ?? "console").setIssuedAt(secs()).setExpirationTime(secs() + (opts.ttl ?? 900))
     .sign(opts.signer ?? key.privateKey);
@@ -97,14 +97,14 @@ describe("where a person is sent back to", () => {
 });
 
 describe("writes must come from the app's own pages", () => {
-  const host = "console.cgspectrum.com";
+  const host = "app.example.test";
   const from = (origin: string | null, secFetchSite: string | null = null, method = "POST") =>
     originAllowed({ method, origin, secFetchSite, host });
-  it("reads are never blocked", () => expect(from("https://www.cgspectrum.com", "same-site", "GET")).toBe(true));
+  it("reads are never blocked", () => expect(from("https://www.example.test", "same-site", "GET")).toBe(true));
   it("the app's own pages may write", () => expect(from(`https://${host}`, "same-origin")).toBe(true));
   it("sibling hosts may not, though they are the same SITE", () => {
-    expect(from("https://www.cgspectrum.com", "same-site")).toBe(false);
-    expect(from("https://learn.cgspectrum.com", "same-site")).toBe(false);
+    expect(from("https://www.example.test", "same-site")).toBe(false);
+    expect(from("https://other.example.test", "same-site")).toBe(false);
   });
   it("another site, a look-alike host and a sandboxed page may not", () => {
     expect(from("https://evil.test", "cross-site")).toBe(false);
@@ -118,7 +118,7 @@ describe("writes must come from the app's own pages", () => {
     expect(from(null, "cross-site")).toBe(false);
   });
   it("a listed sibling app may call", () =>
-    expect(originAllowed({ method: "POST", origin: "https://home.cgspectrum.com", secFetchSite: "same-site", host, allowed: ["https://home.cgspectrum.com"] })).toBe(true));
+    expect(originAllowed({ method: "POST", origin: "https://peer.example.test", secFetchSite: "same-site", host, allowed: ["https://peer.example.test"] })).toBe(true));
 });
 
 describe("a page navigation", () => {
@@ -136,12 +136,12 @@ describe("checking a token", () => {
   it("accepts one the hub signed for this app", async () => {
     const c = await setup().hub.check(await mint());
     expect(c.state).toBe("valid");
-    if (c.state === "valid") expect(c.session).toMatchObject({ email: "a@cgspectrum.com", subject: "g1", loginProvider: "workos", kind: "staff" });
+    if (c.state === "valid") expect(c.session).toMatchObject({ email: "a@example.test", subject: "g1", loginProvider: "workos", kind: "staff" });
   });
   it("refuses a token for ANOTHER app, from another hub, or signed by another key", async () => {
     const { hub } = setup();
     expect((await hub.check(await mint({}, { aud: "home" }))).state).toBe("invalid");
-    expect((await hub.check(await mint({}, { iss: "https://auth.staging.cgspectrum.com" }))).state).toBe("invalid");
+    expect((await hub.check(await mint({}, { iss: "https://hub.other.example.test" }))).state).toBe("invalid");
     expect((await hub.check(await mint({}, { signer: other.privateKey }))).state).toBe("invalid");
   });
   it("refuses an unsigned token and a tampered one", async () => {
@@ -439,16 +439,16 @@ describe("mode both, when the hub has ended the app's own session", () => {
 describe("the origin guard in the middleware", () => {
   const signedIn = async () => ({ [names.token]: await mint(), [names.handle]: "h1" });
   it("refuses a signed-in write from a sibling host", async () => {
-    const res = (await setup().handle(request("/save", { method: "POST", headers: { origin: "https://www.cgspectrum.com" }, cookies: await signedIn() })))!;
+    const res = (await setup().handle(request("/save", { method: "POST", headers: { origin: "https://www.example.test" }, cookies: await signedIn() })))!;
     expect(res.status).toBe(403);
   });
   it("also protects a person signed in the OLD way", async () => {
-    const res = (await setup({ mode: "both" }).handle(request("/save", { method: "POST", headers: { origin: "https://learn.cgspectrum.com" }, cookies: { "__Secure-authjs.session-token": "x" } }), { legacySignedIn: true }))!;
+    const res = (await setup({ mode: "both" }).handle(request("/save", { method: "POST", headers: { origin: "https://other.example.test" }, cookies: { "__Secure-authjs.session-token": "x" } }), { legacySignedIn: true }))!;
     expect(res.status).toBe(403);
   });
   it("report mode logs and lets it through", async () => {
     const seen: string[] = [];
-    const res = (await setup({ originGuard: "report", log: (m) => seen.push(m) }).handle(request("/save", { method: "POST", headers: { origin: "https://www.cgspectrum.com" }, cookies: await signedIn() })))!;
+    const res = (await setup({ originGuard: "report", log: (m) => seen.push(m) }).handle(request("/save", { method: "POST", headers: { origin: "https://www.example.test" }, cookies: await signedIn() })))!;
     expect(res.headers.get("x-middleware-next")).toBe("1");
     expect(seen.join()).toContain("report only");
   });
@@ -710,7 +710,7 @@ describe("server code reading the session", () => {
   const jar = (token?: string) => ({ get: (n: string) => (n === names.token && token ? { value: token } : undefined) });
   it("a good token is the person; no token is nobody", async () => {
     const { hub } = setup();
-    expect((await readAppSession(hub, true, jar(await mint())))?.email).toBe("a@cgspectrum.com");
+    expect((await readAppSession(hub, true, jar(await mint())))?.email).toBe("a@example.test");
     expect(await readAppSession(hub, true, jar())).toBeNull();
   });
   it("an expired token is nobody, unless the middleware marked the hub unreachable", async () => {

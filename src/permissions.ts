@@ -68,7 +68,7 @@ export function personFromSession(session: AppSession): PermissionPerson {
 }
 
 export interface PermissionCheckOptions {
-  /** The hub, e.g. https://auth.cgspectrum.com. */
+  /** The hub, e.g. https://hub.example.test. */
   hubUrl: string;
   /**
    * THIS app's own key for the check, from the app's server environment

@@ -178,7 +178,7 @@ export function originAllowed(input: {
   secFetchSite: string | null;
   /** This app's own host, as the request reached it. */
   host: string;
-  /** Other origins allowed to call (exact, e.g. "https://home.cgspectrum.com"). */
+  /** Other origins allowed to call (exact, e.g. "https://peer.example.test"). */
   allowed?: readonly string[];
 }): boolean {
   if (SAFE.has(input.method.toUpperCase())) return true;
