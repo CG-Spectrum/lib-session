@@ -188,6 +188,25 @@ if (page["other.permission"] === "held") showEditor(); // ⛔ "unavailable" is N
   some records". Necessary, not sufficient: the app still applies the scope.
 - The package reads no environment variable. The app passes its key in.
 
+## Organisation and region
+
+`session.org` and `session.region` say which organisation owns the signed-in
+person and where that organisation's records are held, from the token's signed
+`org` and `region` claims.
+
+```ts
+const db = recordsFor(session.region ?? homeRegion); // the app's own resolver
+```
+
+- ⛔ A routing hint, not an authorisation. Never decide access from either.
+- `region` is one of `REGIONS` (`au`, `uk`, `us`, `eu`) or `null`; an unknown
+  value reads as `null`. `org` is a short key (lower case, digits, underscores)
+  or `null`.
+- `null` means the hub said nothing (an older hub, the claim switched off, a
+  read that failed, a login with no owner on record). It is never a default:
+  the app chooses what "not said" means.
+- The package names no organisation and no region beyond the list.
+
 ## Cookies
 
 `__Host-cgsi.session`, `__Host-cgsi.session-handle`,
@@ -195,6 +214,13 @@ if (page["other.permission"] === "held") showEditor(); // ⛔ "unavailable" is N
 HttpOnly, Secure, SameSite=Lax. Never a parent domain.
 
 ## Changes
+
+### 0.1.8: organisation and region claims
+
+- `AppSession.org` and `AppSession.region` (the token's signed `org` and
+  `region` claims, or `null`), and `REGIONS` / `Region`. A routing hint only.
+- Nothing else changed. Against a hub that sends neither claim, sessions read
+  exactly as in 0.1.7, with `org: null, region: null`.
 
 ### 0.1.7: several permissions in one request
 

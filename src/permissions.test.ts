@@ -7,7 +7,7 @@ import { createHub } from "./hub";
 import {
   HUB_PERMISSION_CHECK_MAX, HUB_PERMISSION_CHECK_TIMEOUT_MS, createPermissionCheck, personFromSession, showsPermission,
 } from "./permissions";
-import type { AppSession } from "./core";
+import { REGIONS, type AppSession } from "./core";
 
 const HUB = "https://hub.example.test";
 const KEY = "k".repeat(43);
@@ -46,6 +46,36 @@ function standIn(answer: (c: Call) => Response | Promise<Response>) {
 }
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+describe("org and region: a routing hint", () => {
+  it("reads both signed claims into the session", async () => {
+    const s = await verified({ org: "example_org", region: "uk" });
+    expect(s.org).toBe("example_org");
+    expect(s.region).toBe("uk");
+  });
+  it("every listed region is read", async () => {
+    for (const r of REGIONS) expect((await verified({ region: r })).region).toBe(r);
+  });
+  it("absent is null, never a default", async () => {
+    const s = await verified({});
+    expect(s.org).toBeNull();
+    expect(s.region).toBeNull();
+  });
+  it("a region outside the list is null, and so is a cloud region name", async () => {
+    for (const r of ["xx", "AU", "ap-southeast-2", "", 1, ["au"], null]) expect((await verified({ region: r })).region).toBeNull();
+  });
+  it("an org that is not a short key is null", async () => {
+    for (const o of ["", "Example Org", "example-org", "1org", "a".repeat(64), 7, { key: "x" }, null]) {
+      expect((await verified({ org: o })).org).toBeNull();
+    }
+    expect((await verified({ org: "a".repeat(63) })).org).toBe("a".repeat(63));
+  });
+  it("one without the other is read alone", async () => {
+    const s = await verified({ org: "example_org" });
+    expect(s.org).toBe("example_org");
+    expect(s.region).toBeNull();
+  });
+});
 
 describe("the claim: what to SHOW", () => {
   it("reads the signed claim into the session", async () => {

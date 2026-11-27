@@ -224,11 +224,33 @@ export interface AppSession {
    * off, or a read that failed). ⛔ Display only: see `showsPermission`.
    */
   permissions: string[] | null;
+  /**
+   * The key of the organisation that owns the person, from the token's `org`
+   * claim, or null when the hub sent none (an older hub, the claim switched
+   * off, a read that failed, or a login with no owner on record). ⛔ A routing
+   * hint, not an authorisation: never decide access from it.
+   */
+  org: string | null;
+  /**
+   * Where that organisation's records are held, from the token's `region`
+   * claim: one of `REGIONS`, or null when the hub sent none or sent a value
+   * this package does not know. ⛔ A routing hint, not an authorisation.
+   * Null means "not said", never a default region.
+   */
+  region: Region | null;
   /** When the token runs out (seconds since 1970). */
   expiresAt: number;
 }
 
 const str = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+/** The regions a token's `region` claim may name. Anything else reads as null. */
+export const REGIONS = ["au", "uk", "us", "eu"] as const;
+export type Region = (typeof REGIONS)[number];
+const isRegion = (v: unknown): v is Region => typeof v === "string" && (REGIONS as readonly string[]).includes(v);
+/** An organisation key: short, lower case, letters, digits and underscores. */
+const ORG_KEY = /^[a-z][a-z0-9_]{0,62}$/;
+const isOrgKey = (v: unknown): v is string => typeof v === "string" && ORG_KEY.test(v);
 /** A verified token's claims as an AppSession, or null if anything needed is missing. */
 export function sessionFromClaims(p: Record<string, unknown>): AppSession | null {
   if (!str(p.sid) || !str(p.email) || !str(p.gsub) || !str(p.lprov) || !str(p.kind) || !str(p.role)) return null;
@@ -239,6 +261,8 @@ export function sessionFromClaims(p: Record<string, unknown>): AppSession | null
     departments: Array.isArray(p.departments) ? p.departments.filter(str) : [],
     appRole: str(p.appRole) ? p.appRole : null,
     permissions: Array.isArray(p.permissions) ? p.permissions.filter(str) : null,
+    org: isOrgKey(p.org) ? p.org : null,
+    region: isRegion(p.region) ? p.region : null,
     expiresAt: p.exp,
   };
 }

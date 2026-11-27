@@ -965,7 +965,7 @@ describe("the launcher's list: server code reading it", () => {
     expect(Object.keys(session!).sort()).toEqual(
       // `permissions` is a signed claim from the token (null here: this token
       // carries none), never the launcher's unsigned list.
-      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "permissions", "role", "sid", "subject"],
+      ["appRole", "departments", "email", "expiresAt", "kind", "loginProvider", "name", "org", "permissions", "region", "role", "sid", "subject"],
     );
     expect(session!.permissions).toBeNull();
   });
