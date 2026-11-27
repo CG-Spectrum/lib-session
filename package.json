@@ -1,6 +1,6 @@
 {
   "name": "@cgsi/session",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": false,
   "type": "module",
   "description": "Per-app sessions for CGSI apps: a hub-signed token in a host-only cookie.",
@@ -8,7 +8,9 @@
     ".": "./src/index.ts",
     "./server": "./src/server.ts"
   },
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
